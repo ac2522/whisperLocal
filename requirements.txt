@@ -1,0 +1,18 @@
+# Audio processing
+pyaudio>=0.2.11
+webrtcvad>=2.0.10
+
+# Machine learning
+openai-whisper>=20231117
+torch>=2.0.0
+numpy>=1.24.0
+
+# GUI
+PyQt5>=5.15.0
+
+# Utilities
+pyperclip>=1.8.2
+pynput>=1.7.6
+
+# Optional: For building standalone executable
+# pyinstaller>=5.0

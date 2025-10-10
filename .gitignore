@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+whisper_env/
+ENV/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# PyInstaller
+*.spec
+*.manifest
+
+# Logs
+*.log
+app_errors.log
+
+# Settings (contains user data)
+settings.json
+
+# Audio files
+*.wav
+*.mp3
+*.flac
+temp_audio.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
