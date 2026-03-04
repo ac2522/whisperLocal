@@ -1,274 +1,191 @@
-# Whisper2Text
+# whisperLocal
 
-A desktop speech-to-text application using OpenAI's Whisper model with a PyQt5 GUI. Features real-time audio recording, automatic transcription, and clipboard integration.
+Local speech-to-text using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with CUDA GPU acceleration. PyQt5 desktop app with system tray, global hotkeys, and auto-paste.
+
+Built for Linux with NVIDIA GPUs. No cloud APIs, everything runs locally.
 
 ## Features
 
-- **Voice Activity Detection (VAD)**: Automatically detects speech using WebRTC VAD
-- **Multiple Recording Modes**:
-  - Silence mode: Automatically stops recording after a period of silence
-  - Button mode: Manual start/stop control
-- **Global Hotkey**: `Ctrl+Alt+Shift+L` to start/stop recording from anywhere
-- **System Tray Integration**: Runs in the background with tray icon
-- **Auto-paste**: Optionally paste transcribed text automatically
-- **Persistent History**: Keeps last 10 transcriptions
-- **Customizable Settings**: Adjust VAD sensitivity, model size, silence duration, and more
-
-## Screenshots
-
-The app displays:
-- Recent transcriptions as clickable buttons
-- Recording indicator in system tray
-- Settings dialog for customization
+- **Fast local transcription** via whisper.cpp (CUDA-accelerated)
+- **Voice Activity Detection**: auto-stops recording after silence (WebRTC VAD)
+- **Two recording modes**: silence detection or manual button/hotkey
+- **Global hotkey**: `Ctrl+Alt+Shift+L` (configurable, works on Wayland via evdev)
+- **System tray**: blue icon idle, red when recording
+- **Auto-paste**: optionally types transcribed text into the focused window (via ydotool)
+- **Model management**: download/delete ggml models from the Settings dialog
+- **Crash recovery**: systemd service auto-restarts on failure
+- **Persistent history**: last 10 transcriptions saved across sessions
 
 ## Requirements
 
-- Python 3.8+
-- PyQt5
-- OpenAI Whisper
-- PyAudio
-- WebRTC VAD
-- Additional dependencies (see requirements.txt)
+- Linux (tested on Ubuntu 24.04)
+- Python 3.10+
+- NVIDIA GPU with CUDA support (falls back to CPU)
+- CUDA toolkit installed
+- PortAudio development libraries
 
 ## Installation
 
-### Ubuntu/Linux
+### 1. System dependencies
 
-1. **Install system dependencies:**
 ```bash
-sudo apt update
-sudo apt install -y python3-pip python3-dev portaudio19-dev
+sudo apt install portaudio19-dev python3-pyaudio python3-pyqt5 ydotool
 ```
 
-2. **Clone the repository:**
+For global hotkeys, your user needs to be in the `input` group:
+
 ```bash
-git clone https://github.com/yourusername/whisper2text.git
-cd whisper2text
+sudo usermod -aG input $USER
+# Log out and back in
 ```
 
-3. **Create a virtual environment:**
+### 2. Clone and set up
+
 ```bash
+git clone https://github.com/ac2522/whisperLocal.git
+cd whisperLocal
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-4. **Install Python dependencies:**
+### 3. Install Python dependencies
+
 ```bash
+# With CUDA GPU support (recommended):
+GGML_CUDA=1 pip install pywhispercpp --no-binary pywhispercpp --no-cache-dir
+
+# Install the rest:
 pip install -r requirements.txt
 ```
 
-5. **Run the application:**
+### 4. Run from source (optional, to verify it works)
+
 ```bash
-python whisper2text.py
+python3 whisper2text.py
 ```
 
-### macOS
+On first run, open Settings and download a model (start with `ggml-base.bin`).
 
-1. **Install Homebrew** (if not already installed):
+### 5. Install as desktop app
+
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+./install.sh
 ```
 
-2. **Install system dependencies:**
+This builds a PyInstaller binary locally (matching your GPU drivers), installs it to `~/.local/share/whisperLocal/`, and sets up a systemd user service with auto-restart.
+
+## Managing the service
+
 ```bash
-brew install portaudio python3
+systemctl --user status whisper2text      # Check status
+systemctl --user restart whisper2text     # Restart
+systemctl --user stop whisper2text        # Stop
+journalctl --user -u whisper2text -f      # View logs
 ```
 
-3. **Clone the repository:**
+The service auto-starts on login and restarts on crash (up to 5 times per minute).
+
+## Uninstalling
+
 ```bash
-git clone https://github.com/yourusername/whisper2text.git
-cd whisper2text
+./uninstall.sh
 ```
 
-4. **Create a virtual environment:**
+This removes the binary, desktop entry, and systemd service. Your settings and models in `~/.whisper2text/` are preserved. To remove everything:
+
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-5. **Install Python dependencies:**
-```bash
-pip install -r requirements.txt
-```
-
-6. **Grant accessibility permissions:**
-   - Go to System Preferences → Security & Privacy → Privacy → Accessibility
-   - Add Terminal or your Python executable to allow keyboard control
-
-7. **Run the application:**
-```bash
-python whisper2text.py
-```
-
-### Windows
-
-1. **Install Python 3.8+** from [python.org](https://www.python.org/downloads/)
-
-2. **Clone the repository:**
-```cmd
-git clone https://github.com/yourusername/whisper2text.git
-cd whisper2text
-```
-
-3. **Create a virtual environment:**
-```cmd
-python -m venv venv
-venv\Scripts\activate
-```
-
-4. **Install dependencies:**
-```cmd
-pip install -r requirements.txt
-```
-
-5. **Run the application:**
-```cmd
-python whisper2text.py
+rm -rf ~/.whisper2text
 ```
 
 ## Usage
 
-### Basic Usage
+1. **Start recording**: click Record, press `Ctrl+Alt+Shift+L`, or use the tray menu
+2. **Stop recording**: in silence mode, wait for silence; in button mode, click/press hotkey again
+3. **Copy text**: click any transcription button to copy to clipboard
+4. **Auto-paste**: enable in Settings to auto-type text into the focused window
 
-1. **Launch the app:**
-```bash
-python whisper2text.py
-```
+## Settings
 
-2. **Start recording:**
-   - Click the "Record" button, or
-   - Press `Ctrl+Alt+Shift+L` (global hotkey), or
-   - Use the system tray menu
+Access via the gear icon or tray menu:
 
-3. **Stop recording:**
-   - In silence mode: Wait for the configured silence duration (default 5 seconds)
-   - In button mode: Click "Stop Recording" or press the hotkey again
+- **Model**: select from downloaded ggml models (download more in Settings)
+- **Compute backend**: CUDA, Vulkan, or CPU
+- **Audio device**: select input microphone
+- **Recording mode**: silence detection or manual button
+- **VAD aggressiveness** (0-3): higher = more aggressive noise filtering
+- **Silence duration**: seconds of silence before auto-stop
+- **Hotkey**: configurable global keyboard shortcut
+- **Auto-paste**: auto-type transcriptions via ydotool
 
-4. **View transcriptions:**
-   - Transcriptions appear as buttons in the main window
-   - Click any transcription to copy it to clipboard
-   - If auto-paste is enabled, it will paste automatically
+## Models
 
-### Command Line Options
+Models are downloaded through the app's Settings dialog. Available models:
 
-```bash
-# Use button mode instead of silence detection
-python whisper2text.py --recording_mode button
+| Model | Size | Notes |
+|-------|------|-------|
+| ggml-base.bin | ~142 MB | Good starting point |
+| ggml-small.bin | ~466 MB | Better accuracy |
+| ggml-medium.bin | ~1.5 GB | High accuracy |
+| ggml-large-v3.bin | ~3 GB | Best accuracy |
+| ggml-large-v3-turbo.bin | ~1.5 GB | Fast + accurate |
+| ggml-medium-q5_0.bin | ~500 MB | Quantized, nearly same accuracy |
+| ggml-large-v3-turbo-q5_0.bin | ~500 MB | Quantized turbo |
 
-# Set silence duration to 3 seconds
-python whisper2text.py --break_length 3
-```
-
-### Settings
-
-Access settings via the gear icon in the app:
-
-- **VAD Aggressiveness** (0-3): Higher values filter more aggressively (0 = least aggressive, 3 = most aggressive)
-- **Model Size**: Choose between `tiny`, `base`, `small`, `medium`, `large`
-  - `tiny`: Fastest, least accurate
-  - `base`: Good balance (default)
-  - `large`: Best accuracy, slowest
-- **Padding Duration**: Time to continue recording after silence is detected
-- **Recording Mode**: `silence` or `button`
-- **Silence Duration**: How long to wait in silence before stopping (silence mode only)
-- **Auto-paste**: Automatically paste transcriptions after copying
-
-## Building Standalone Executable
-
-### Ubuntu/Linux
-
-```bash
-pip install pyinstaller
-pyinstaller whisper2text.spec
-```
-
-The executable will be in `dist/whisper2text/whisper2text`
-
-### macOS
-
-```bash
-pip install pyinstaller
-pyinstaller --windowed --add-data "icon.png:." --add-data "icon_recording.png:." whisper2text.py
-```
-
-The app bundle will be in `dist/whisper2text.app`
-
-## Troubleshooting
-
-### Linux: No sound input
-
-Make sure your user is in the `audio` group:
-```bash
-sudo usermod -a -G audio $USER
-```
-Log out and log back in for changes to take effect.
-
-### macOS: Microphone permission denied
-
-Grant microphone access:
-- System Preferences → Security & Privacy → Privacy → Microphone
-- Add Terminal or Python to the allowed apps
-
-### macOS: Auto-paste not working
-
-Grant accessibility permissions:
-- System Preferences → Security & Privacy → Privacy → Accessibility
-- Add Terminal or Python to the allowed apps
-
-### General: PyAudio installation fails
-
-**Linux:**
-```bash
-sudo apt install portaudio19-dev python3-pyaudio
-```
-
-**macOS:**
-```bash
-brew install portaudio
-```
-
-**Windows:**
-Download the appropriate `.whl` file from [here](https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio) and install with:
-```cmd
-pip install PyAudio‑0.2.11‑cp38‑cp38‑win_amd64.whl
-```
-
-## Configuration
-
-Settings are stored in `~/.whisper2text/settings.json` and include:
-- VAD aggressiveness
-- Whisper model size
-- Recording mode preferences
-- Recent transcriptions
-- Auto-paste preference
+Models are stored in `~/.whisper2text/models/` and are not included in the repo.
 
 ## Architecture
 
-- **GUI**: PyQt5 for cross-platform desktop interface
-- **Audio Capture**: PyAudio for cross-platform audio recording
-- **Voice Activity Detection**: WebRTC VAD for efficient speech detection
-- **Transcription**: OpenAI Whisper for accurate speech-to-text
-- **Clipboard**: pyperclip for cross-platform clipboard operations
-- **Keyboard Control**: pynput for global hotkeys and auto-paste
+```
+whisperLocal/
+├── whisper2text.py          # Entry point
+├── engine/
+│   ├── whisper_engine.py    # pywhispercpp wrapper
+│   └── model_manager.py     # Model download/management
+├── audio/
+│   ├── recorder.py          # Recording (button/silence modes)
+│   └── device_manager.py    # Audio device selection
+├── ui/
+│   ├── main_window.py       # Main PyQt5 window + tray
+│   ├── settings_dialog.py   # Settings with model/device selectors
+│   └── error_panel.py       # Error/log display
+├── config/
+│   ├── settings.py          # Settings persistence
+│   ├── paths.py             # Path resolution (PyInstaller-aware)
+│   ├── logging_setup.py     # Logging configuration
+│   └── process_lock.py      # Single-instance lock
+├── packaging/
+│   ├── whisper2text.desktop  # GNOME launcher
+│   ├── whisper2text.service  # systemd user service
+│   └── rthook_cuda.py       # PyInstaller CUDA runtime hook
+├── install.sh               # Build + install
+├── uninstall.sh              # Clean removal
+└── whisper2text.spec         # PyInstaller build spec
+```
+
+## Deploying to another machine
+
+No pre-built releases (CUDA libs are ~1 GB and driver-specific). Build locally on each machine:
+
+```bash
+git clone https://github.com/ac2522/whisperLocal.git
+cd whisperLocal
+python3 -m venv venv
+source venv/bin/activate
+GGML_CUDA=1 pip install pywhispercpp --no-binary pywhispercpp --no-cache-dir
+pip install -r requirements.txt
+./install.sh
+```
+
+## Troubleshooting
+
+**No sound input**: ensure your user is in the `audio` group (`sudo usermod -aG audio $USER`)
+
+**Global hotkey not working**: ensure your user is in the `input` group and ydotool is installed
+
+**CUDA not detected**: verify `nvidia-smi` works, CUDA toolkit is installed, and pywhispercpp was built with `GGML_CUDA=1`
+
+**PyAudio install fails**: install `portaudio19-dev` (`sudo apt install portaudio19-dev`)
 
 ## License
 
-MIT License - feel free to use and modify as needed.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Known Issues
-
-- First transcription may take longer as the Whisper model loads
-- Large model sizes require significant RAM and GPU (if available)
-- Global hotkey may not work in some desktop environments
-
-## Roadmap
-
-- [ ] Custom hotkey configuration
-- [ ] Export transcriptions to file
-- [ ] Language selection
-- [ ] Multiple audio input device support
-- [ ] Timestamp support in transcriptions
+MIT
