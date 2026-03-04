@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Speech to Text
+Comment=Local speech-to-text using Whisper
+Exec=%HOME%/.local/share/whisperLocal/whisper2text
+Icon=%HOME%/.local/share/whisperLocal/icon.png
+Terminal=false
+Categories=Utility;Audio;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

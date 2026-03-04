@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
 *$py.class
 *.so
 .Python
@@ -14,15 +15,19 @@ dist/
 .eggs/
 
 # PyInstaller
-*.spec
 *.manifest
 
 # Logs
 *.log
-app_errors.log
+
+# Lock files
+*.lock
 
 # Settings (contains user data)
 settings.json
+
+# User data directory
+.whisper2text/
 
 # Audio files
 *.wav
@@ -36,6 +41,12 @@ temp_audio.*
 *.swp
 *.swo
 *~
+
+# Models (large binary files)
+models/*.bin
+
+# Worktrees
+.worktrees/
 
 # OS
 .DS_Store

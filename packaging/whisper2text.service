@@ -1,0 +1,17 @@
+[Unit]
+Description=Speech to Text (whisper2text)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/whisperLocal/whisper2text
+Restart=on-failure
+RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+
+[Install]
+WantedBy=graphical-session.target
