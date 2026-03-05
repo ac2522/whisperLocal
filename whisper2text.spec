@@ -13,6 +13,8 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 datas = [
     ('icon.png', '.'),
     ('icon_recording.png', '.'),
+    ('icon_tray.png', '.'),
+    ('icon_recording_tray.png', '.'),
 ]
 
 # ── Binary collection ───────────────────────────────────────────────────

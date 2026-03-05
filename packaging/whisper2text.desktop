@@ -5,6 +5,6 @@ Comment=Local speech-to-text using Whisper
 Exec=%HOME%/.local/share/whisperLocal/whisper2text
 Icon=%HOME%/.local/share/whisperLocal/whisper2text.png
 Terminal=false
-Categories=Utility;Audio;
+Categories=AudioVideo;Audio;Utility;
 StartupNotify=false
 X-GNOME-Autostart-enabled=true

@@ -19,6 +19,8 @@ USER_DATA_DIR = os.path.join(os.path.expanduser('~'), '.whisper2text')
 # Icon paths (bundled with the app)
 ICON_NORMAL = os.path.join(APP_DIR, 'icon.png')
 ICON_RECORDING = os.path.join(APP_DIR, 'icon_recording.png')
+ICON_TRAY_NORMAL = os.path.join(APP_DIR, 'icon_tray.png')
+ICON_TRAY_RECORDING = os.path.join(APP_DIR, 'icon_recording_tray.png')
 
 # Default models directory (in user data, not in app bundle)
 DEFAULT_MODELS_DIR = os.path.join(USER_DATA_DIR, 'models')
