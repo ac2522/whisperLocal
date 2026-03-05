@@ -232,8 +232,8 @@ class MainWindow(QWidget):
 
         settings_button = QPushButton()
         settings_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-        settings_button.setIconSize(QSize(40, 40))
-        settings_button.setFixedSize(50, 50)
+        settings_button.setIconSize(QSize(20, 20))
+        settings_button.setFixedSize(28, 28)
         settings_button.setFlat(True)
         settings_button.setToolTip("Settings")
         settings_button.clicked.connect(self._open_settings)
@@ -494,8 +494,13 @@ class MainWindow(QWidget):
 
         self.record_button.setText('Stop Recording')
         self.record_button.setEnabled(True)  # Keep enabled so user can click to stop
-        self._update_record_action_text()
-        self._update_tray_icon()
+        self.record_action.setText("Stop Recording")
+        self.tray_icon.setToolTip("Speech to Text (Recording...)")
+        # Set red tray icon immediately (before recording thread starts)
+        if os.path.exists(ICON_TRAY_RECORDING):
+            self.tray_icon.setIcon(QIcon(ICON_TRAY_RECORDING))
+        self.setWindowIcon(QIcon(ICON_RECORDING) if os.path.exists(ICON_RECORDING)
+                           else self.style().standardIcon(QStyle.SP_MediaStop))
 
         if recording_mode == 'button':
             threading.Thread(target=self._record_button, daemon=True).start()
@@ -718,18 +723,18 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _paste_text(self, text):
-        """Type text into the focused window using ydotool.
+        """Paste text into the focused window via clipboard + Ctrl+V.
 
-        ydotool injects keystrokes at the kernel level via /dev/uinput,
-        which works on both Wayland (GNOME/Mutter) and X11.  wtype does NOT
-        work on GNOME because Mutter doesn't support the wlr-virtual-keyboard
-        protocol.
+        Text is already on the clipboard (pyperclip.copy is called before this).
+        We just simulate Ctrl+V using ydotool, which is instant regardless of
+        text length.  ydotool injects keystrokes at the kernel level via
+        /dev/uinput, which works on both Wayland and X11.
         """
         try:
             time.sleep(0.05)
             subprocess.run(
-                ['ydotool', 'type', '--delay', '100', '--key-delay', '12', '--', text],
-                timeout=10, check=False,
+                ['ydotool', 'key', '29:1', '47:1', '47:0', '29:0'],
+                timeout=5, check=False,
             )
         except Exception as e:
             logger.error("Failed to paste text: %s", e, exc_info=True)
