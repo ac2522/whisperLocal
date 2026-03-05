@@ -232,8 +232,8 @@ class MainWindow(QWidget):
 
         settings_button = QPushButton()
         settings_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-        settings_button.setIconSize(QSize(20, 20))
-        settings_button.setFixedSize(28, 28)
+        settings_button.setIconSize(QSize(24, 24))
+        settings_button.setFixedSize(40, 40)
         settings_button.setFlat(True)
         settings_button.setToolTip("Settings")
         settings_button.clicked.connect(self._open_settings)
