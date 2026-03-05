@@ -38,10 +38,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtCore import Qt, QSize, pyqtSignal
 
+import shutil
+
 from config.paths import (
     ICON_NORMAL, ICON_RECORDING,
     ICON_TRAY_NORMAL, ICON_TRAY_RECORDING,
-    DEFAULT_MODELS_DIR,
+    ICON_DASH, DEFAULT_MODELS_DIR,
 )
 from config.settings import SettingsManager
 from engine.model_manager import ModelManager
@@ -449,7 +451,7 @@ class MainWindow(QWidget):
                 self.activateWindow()
 
     def _update_tray_icon(self):
-        """Update tray and window icon based on recording/transcribing state."""
+        """Update tray, window, and dash icon based on recording/transcribing state."""
         is_active = self.recorder.is_recording or self.is_transcribing
         if is_active:
             tray_path = ICON_TRAY_RECORDING
@@ -462,6 +464,13 @@ class MainWindow(QWidget):
 
         self.tray_icon.setIcon(QIcon(tray_path) if os.path.exists(tray_path) else fallback)
         self.setWindowIcon(QIcon(window_path) if os.path.exists(window_path) else fallback)
+
+        # Overwrite the dash icon file so GNOME picks up the change
+        try:
+            if os.path.exists(window_path) and os.path.exists(ICON_DASH):
+                shutil.copy2(window_path, ICON_DASH)
+        except Exception:
+            pass
 
     def _update_record_action_text(self):
         """Update the tray record action text and tooltip."""
@@ -497,11 +506,17 @@ class MainWindow(QWidget):
         self.record_button.setEnabled(True)  # Keep enabled so user can click to stop
         self.record_action.setText("Stop Recording")
         self.tray_icon.setToolTip("Speech to Text (Recording...)")
-        # Set red tray icon immediately (before recording thread starts)
+        # Set red icons immediately (before recording thread starts)
         if os.path.exists(ICON_TRAY_RECORDING):
             self.tray_icon.setIcon(QIcon(ICON_TRAY_RECORDING))
         self.setWindowIcon(QIcon(ICON_RECORDING) if os.path.exists(ICON_RECORDING)
                            else self.style().standardIcon(QStyle.SP_MediaStop))
+        # Overwrite dash icon to red
+        try:
+            if os.path.exists(ICON_RECORDING) and os.path.exists(ICON_DASH):
+                shutil.copy2(ICON_RECORDING, ICON_DASH)
+        except Exception:
+            pass
 
         if recording_mode == 'button':
             threading.Thread(target=self._record_button, daemon=True).start()
