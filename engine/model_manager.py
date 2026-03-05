@@ -3,40 +3,55 @@
 import os
 import urllib.request
 
-HUGGINGFACE_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-
 AVAILABLE_MODELS = [
-    # Tiny
-    {"name": "ggml-tiny.bin", "size_mb": 75, "description": "Tiny (~75MB) — fastest, least accurate"},
-    {"name": "ggml-tiny.en.bin", "size_mb": 75, "description": "Tiny English-only (~75MB)"},
-    {"name": "ggml-tiny-q5_1.bin", "size_mb": 32, "description": "Tiny quantized Q5 (~32MB)"},
-    {"name": "ggml-tiny.en-q5_1.bin", "size_mb": 32, "description": "Tiny English-only Q5 (~32MB)"},
-    # Base
-    {"name": "ggml-base.bin", "size_mb": 142, "description": "Base (~142MB) — good starting point"},
-    {"name": "ggml-base.en.bin", "size_mb": 142, "description": "Base English-only (~142MB)"},
-    {"name": "ggml-base-q5_1.bin", "size_mb": 57, "description": "Base quantized Q5 (~57MB)"},
-    {"name": "ggml-base.en-q5_1.bin", "size_mb": 57, "description": "Base English-only Q5 (~57MB)"},
-    # Small
-    {"name": "ggml-small.bin", "size_mb": 466, "description": "Small (~466MB) — better accuracy"},
-    {"name": "ggml-small.en.bin", "size_mb": 466, "description": "Small English-only (~466MB)"},
-    {"name": "ggml-small-q5_1.bin", "size_mb": 181, "description": "Small quantized Q5 (~181MB)"},
-    {"name": "ggml-small.en-q5_1.bin", "size_mb": 181, "description": "Small English-only Q5 (~181MB)"},
-    # Medium
-    {"name": "ggml-medium.bin", "size_mb": 1533, "description": "Medium (~1.5GB) — high accuracy"},
-    {"name": "ggml-medium.en.bin", "size_mb": 1533, "description": "Medium English-only (~1.5GB)"},
-    {"name": "ggml-medium-q5_0.bin", "size_mb": 539, "description": "Medium quantized Q5 (~539MB)"},
-    {"name": "ggml-medium.en-q5_0.bin", "size_mb": 539, "description": "Medium English-only Q5 (~539MB)"},
-    # Large V1/V2
-    {"name": "ggml-large-v1.bin", "size_mb": 3095, "description": "Large V1 (~3GB)"},
-    {"name": "ggml-large-v2.bin", "size_mb": 3095, "description": "Large V2 (~3GB)"},
-    {"name": "ggml-large-v2-q5_0.bin", "size_mb": 1080, "description": "Large V2 quantized Q5 (~1GB)"},
-    # Large V3
-    {"name": "ggml-large-v3.bin", "size_mb": 3095, "description": "Large V3 (~3GB) — best accuracy"},
-    {"name": "ggml-large-v3-q5_0.bin", "size_mb": 1080, "description": "Large V3 quantized Q5 (~1GB)"},
-    # Large V3 Turbo
-    {"name": "ggml-large-v3-turbo.bin", "size_mb": 1624, "description": "Large V3 Turbo (~1.6GB) — fast + accurate"},
-    {"name": "ggml-large-v3-turbo-q5_0.bin", "size_mb": 574, "description": "Large V3 Turbo Q5 (~574MB)"},
-    {"name": "ggml-large-v3-turbo-q8_0.bin", "size_mb": 874, "description": "Large V3 Turbo Q8 (~874MB)"},
+    # ── Standard Whisper (ggerganov/whisper.cpp) ──────────────────────
+    {"name": "ggml-base.bin", "size_mb": 142,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+     "description": "Base (~142MB) — good starting point"},
+    {"name": "ggml-base.en.bin", "size_mb": 142,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+     "description": "Base English-only (~142MB)"},
+    {"name": "ggml-small.bin", "size_mb": 466,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+     "description": "Small (~466MB) — better accuracy"},
+    {"name": "ggml-small.en.bin", "size_mb": 466,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+     "description": "Small English-only (~466MB)"},
+    {"name": "ggml-medium.bin", "size_mb": 1533,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+     "description": "Medium (~1.5GB) — high accuracy"},
+    {"name": "ggml-medium-q5_0.bin", "size_mb": 539,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
+     "description": "Medium quantized Q5 (~539MB)"},
+    {"name": "ggml-large-v3.bin", "size_mb": 3095,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+     "description": "Large V3 (~3GB) — best accuracy"},
+    {"name": "ggml-large-v3-q5_0.bin", "size_mb": 1080,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
+     "description": "Large V3 quantized Q5 (~1GB)"},
+    {"name": "ggml-large-v3-turbo.bin", "size_mb": 1624,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+     "description": "Large V3 Turbo (~1.6GB) — fast + accurate"},
+    {"name": "ggml-large-v3-turbo-q5_0.bin", "size_mb": 574,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+     "description": "Large V3 Turbo Q5 (~574MB)"},
+    {"name": "ggml-large-v3-turbo-q8_0.bin", "size_mb": 874,
+     "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin",
+     "description": "Large V3 Turbo Q8 (~874MB)"},
+
+    # ── Distil-Whisper (distilled, 5-6x faster) ──────────────────────
+    {"name": "ggml-distil-small.en.bin", "size_mb": 334,
+     "url": "https://huggingface.co/distil-whisper/distil-small.en/resolve/main/ggml-distil-small.en.bin",
+     "description": "Distil Small EN (~334MB) — 4x faster than large-v2"},
+    {"name": "ggml-distil-medium.en.bin", "size_mb": 789,
+     "url": "https://huggingface.co/distil-whisper/distil-medium.en/resolve/main/ggml-medium-32-2.en.bin",
+     "description": "Distil Medium EN (~789MB) — 4x faster, <1% WER loss"},
+    {"name": "ggml-distil-large-v3.bin", "size_mb": 756,
+     "url": "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
+     "description": "Distil Large V3 (~756MB) — 5x faster than large-v3"},
+    {"name": "ggml-distil-large-v3.5.bin", "size_mb": 756,
+     "url": "https://huggingface.co/distil-whisper/distil-large-v3.5-ggml/resolve/main/ggml-model.bin",
+     "description": "Distil Large V3.5 (~756MB) — latest distilled, best speed/accuracy"},
 ]
 
 # Build a lookup dict for quick access by model name.
@@ -135,7 +150,11 @@ class ModelManager:
         str
             Full path of the downloaded model file.
         """
-        url = f"{HUGGINGFACE_BASE}/{model_name}"
+        known = _MODELS_BY_NAME.get(model_name)
+        if known and "url" in known:
+            url = known["url"]
+        else:
+            url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{model_name}"
         dest_path = os.path.join(self.models_dir, model_name)
         partial_path = dest_path + ".partial"
 

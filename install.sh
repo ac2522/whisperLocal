@@ -79,6 +79,9 @@ rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 cp -a dist/whisper2text/* "$INSTALL_DIR/"
 
+# Copy icon to top-level for .desktop file (PyInstaller puts it in _internal/)
+cp "$INSTALL_DIR/_internal/icon.png" "$INSTALL_DIR/whisper2text.png" 2>/dev/null || true
+
 info "Installed $(du -sh "$INSTALL_DIR" | cut -f1) to $INSTALL_DIR"
 
 # ── Step 5: Set up models directory ─────────────────────────────────────

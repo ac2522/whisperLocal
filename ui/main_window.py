@@ -396,11 +396,14 @@ class MainWindow(QWidget):
 
     @staticmethod
     def _make_tray_icon(icon_path):
-        """Create a QIcon scaled for the system tray (22x22)."""
+        """Create a QIcon with multiple sizes for the system tray."""
         if icon_path and os.path.exists(icon_path):
+            icon = QIcon()
             pixmap = QPixmap(icon_path)
-            scaled = pixmap.scaled(QSize(22, 22), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            return QIcon(scaled)
+            for size in (16, 22, 24, 32, 48):
+                scaled = pixmap.scaled(QSize(size, size), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                icon.addPixmap(scaled)
+            return icon
         return None
 
     def _setup_tray(self):
