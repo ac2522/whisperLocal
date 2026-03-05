@@ -449,8 +449,9 @@ class MainWindow(QWidget):
                 self.activateWindow()
 
     def _update_tray_icon(self):
-        """Update tray and window icon based on recording state."""
-        if self.recorder.is_recording:
+        """Update tray and window icon based on recording/transcribing state."""
+        is_active = self.recorder.is_recording or self.is_transcribing
+        if is_active:
             tray_path = ICON_TRAY_RECORDING
             window_path = ICON_RECORDING
             fallback = self.style().standardIcon(QStyle.SP_MediaStop)
@@ -726,14 +727,14 @@ class MainWindow(QWidget):
         """Paste text into the focused window via clipboard + Ctrl+V.
 
         Text is already on the clipboard (pyperclip.copy is called before this).
-        We just simulate Ctrl+V using ydotool, which is instant regardless of
+        We simulate Ctrl+V using ydotool, which is instant regardless of
         text length.  ydotool injects keystrokes at the kernel level via
         /dev/uinput, which works on both Wayland and X11.
         """
         try:
             time.sleep(0.05)
             subprocess.run(
-                ['ydotool', 'key', '29:1', '47:1', '47:0', '29:0'],
+                ['ydotool', 'key', 'ctrl+v'],
                 timeout=5, check=False,
             )
         except Exception as e:
