@@ -35,7 +35,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QFont, QIcon, QPixmap
 from PyQt5.QtCore import Qt, QSize, pyqtSignal
 
 from config.paths import ICON_NORMAL, ICON_RECORDING, DEFAULT_MODELS_DIR
@@ -394,12 +394,22 @@ class MainWindow(QWidget):
     # System tray
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _make_tray_icon(icon_path):
+        """Create a QIcon scaled for the system tray (22x22)."""
+        if icon_path and os.path.exists(icon_path):
+            pixmap = QPixmap(icon_path)
+            scaled = pixmap.scaled(QSize(22, 22), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            return QIcon(scaled)
+        return None
+
     def _setup_tray(self):
         """Set up the system tray icon and its context menu."""
         self.tray_icon = QSystemTrayIcon(self)
 
-        if os.path.exists(ICON_NORMAL):
-            self.tray_icon.setIcon(QIcon(ICON_NORMAL))
+        icon = self._make_tray_icon(ICON_NORMAL)
+        if icon:
+            self.tray_icon.setIcon(icon)
         else:
             self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
 
@@ -447,15 +457,17 @@ class MainWindow(QWidget):
     def _update_tray_icon(self):
         """Update tray and window icon based on recording state."""
         if self.recorder.is_recording:
-            icon_path = ICON_RECORDING if os.path.exists(ICON_RECORDING) else None
+            icon_path = ICON_RECORDING
             default_icon = self.style().standardIcon(QStyle.SP_MediaStop)
         else:
-            icon_path = ICON_NORMAL if os.path.exists(ICON_NORMAL) else None
+            icon_path = ICON_NORMAL
             default_icon = self.style().standardIcon(QStyle.SP_MediaPlay)
 
-        icon = QIcon(icon_path) if icon_path else default_icon
-        self.tray_icon.setIcon(icon)
-        self.setWindowIcon(icon)
+        tray_icon = self._make_tray_icon(icon_path) or default_icon
+        self.tray_icon.setIcon(tray_icon)
+        # Window icon can stay full-size
+        window_icon = QIcon(icon_path) if os.path.exists(icon_path) else default_icon
+        self.setWindowIcon(window_icon)
 
     def _update_record_action_text(self):
         """Update the tray record action text and tooltip."""

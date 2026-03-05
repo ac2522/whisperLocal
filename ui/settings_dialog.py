@@ -257,9 +257,8 @@ class SettingsDialog(QDialog):
         self._hotkey_display.setAlignment(Qt.AlignCenter)
         self._hotkey_display.setStyleSheet(
             "QLineEdit { background-color: white; color: black; border: 2px solid blue;"
-            " border-radius: 5px; padding: 8px; font-size: 14px; font-weight: bold; }"
+            " border-radius: 5px; padding: 4px; font-weight: bold; }"
         )
-        self._hotkey_display.setMinimumHeight(40)
         row.addWidget(self._hotkey_display)
 
         capture_btn = QPushButton("Capture")
@@ -411,14 +410,13 @@ class _HotkeyCaptureDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Set Hotkey")
-        self.setMinimumSize(500, 220)
+        self.setMinimumSize(300, 150)
         self.captured_hotkey = ""
         self.setFocusPolicy(Qt.StrongFocus)
         self.setStyleSheet(
             "QDialog { background-color: #2b2b2b; }"
             " QPushButton { color: white; background-color: #444;"
-            "   border: 1px solid #666; border-radius: 4px; padding: 8px 20px;"
-            "   font-size: 14px; }"
+            "   border: 1px solid #666; border-radius: 4px; padding: 4px 12px; }"
             " QPushButton:hover { background-color: #555; }"
         )
 
@@ -428,14 +426,13 @@ class _HotkeyCaptureDialog(QDialog):
 
         self._label = QLabel("Press your desired key combination:")
         self._label.setAlignment(Qt.AlignCenter)
-        self._label.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
+        self._label.setStyleSheet("color: white; font-weight: bold;")
         layout.addWidget(self._label)
 
         self._display = QLabel("(waiting for keypress)")
         self._display.setStyleSheet(
             "QLabel { background-color: white; color: #222; border: 2px solid #4a90d9;"
-            " border-radius: 8px; padding: 15px; font-size: 24px; font-weight: bold;"
-            " min-height: 40px; }"
+            " border-radius: 8px; padding: 8px; font-weight: bold; }"
         )
         self._display.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._display)
