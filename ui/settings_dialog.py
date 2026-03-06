@@ -249,31 +249,17 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout()
 
         current = self._settings.get("hotkey", "Ctrl+Alt+Shift+L")
-        vbox.addWidget(QLabel("Press 'Capture' to set a new hotkey"))
+        vbox.addWidget(QLabel("Hotkey (e.g. Ctrl+Alt+S, Ctrl+Shift+Z)"))
 
-        row = QHBoxLayout()
         self._hotkey_display = QLineEdit(current)
-        self._hotkey_display.setReadOnly(True)
         self._hotkey_display.setAlignment(Qt.AlignCenter)
         self._hotkey_display.setStyleSheet(
             "QLineEdit { background-color: white; color: black; border: 2px solid blue;"
             " border-radius: 5px; padding: 4px; font-weight: bold; }"
         )
-        row.addWidget(self._hotkey_display)
-
-        capture_btn = QPushButton("Capture")
-        capture_btn.clicked.connect(self._capture_hotkey)
-        row.addWidget(capture_btn)
-
-        vbox.addLayout(row)
+        vbox.addWidget(self._hotkey_display)
         group.setLayout(vbox)
         return group
-
-    def _capture_hotkey(self):
-        """Open a small dialog that captures a hotkey combo."""
-        dialog = _HotkeyCaptureDialog(self)
-        if dialog.exec_() == QDialog.Accepted and dialog.captured_hotkey:
-            self._hotkey_display.setText(dialog.captured_hotkey)
 
     # ------------------------------------------------------------------
     # Model helpers
@@ -404,101 +390,3 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
-class _HotkeyCaptureDialog(QDialog):
-    """Dialog that captures a keyboard shortcut."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Set Hotkey")
-        self.setMinimumSize(300, 150)
-        self.captured_hotkey = ""
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setStyleSheet(
-            "QDialog { background-color: #2b2b2b; }"
-            " QPushButton { color: white; background-color: #444;"
-            "   border: 1px solid #666; border-radius: 4px; padding: 4px 12px; }"
-            " QPushButton:hover { background-color: #555; }"
-        )
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(15)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        self._label = QLabel("Press your desired key combination:")
-        self._label.setAlignment(Qt.AlignCenter)
-        self._label.setStyleSheet("color: white; font-weight: bold;")
-        layout.addWidget(self._label)
-
-        self._display = QLabel("(waiting for keypress)")
-        self._display.setStyleSheet(
-            "QLabel { background-color: white; color: #222; border: 2px solid #4a90d9;"
-            " border-radius: 8px; padding: 8px; font-weight: bold; }"
-        )
-        self._display.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self._display)
-
-        layout.addStretch()
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.setFocus()
-        self.grabKeyboard()
-
-    def closeEvent(self, event):
-        self.releaseKeyboard()
-        super().closeEvent(event)
-
-    def keyPressEvent(self, event):
-        parts = []
-        mods = event.modifiers()
-        if mods & Qt.ControlModifier:
-            parts.append("Ctrl")
-        if mods & Qt.AltModifier:
-            parts.append("Alt")
-        if mods & Qt.ShiftModifier:
-            parts.append("Shift")
-        if mods & Qt.MetaModifier:
-            parts.append("Super")
-
-        key = event.key()
-        if key in (Qt.Key_Control, Qt.Key_Alt, Qt.Key_Shift, Qt.Key_Meta,
-                   Qt.Key_AltGr, Qt.Key_Super_L, Qt.Key_Super_R):
-            self._display.setText("+".join(parts) + "+...")
-            return
-
-        # Resolve the key name from Qt key code (always reliable, unlike event.text())
-        special_keys = {
-            Qt.Key_Space: "Space", Qt.Key_Return: "Enter",
-            Qt.Key_Tab: "Tab", Qt.Key_Backspace: "Backspace",
-            Qt.Key_Delete: "Delete", Qt.Key_Escape: "Esc",
-            Qt.Key_F1: "F1", Qt.Key_F2: "F2", Qt.Key_F3: "F3",
-            Qt.Key_F4: "F4", Qt.Key_F5: "F5", Qt.Key_F6: "F6",
-            Qt.Key_F7: "F7", Qt.Key_F8: "F8", Qt.Key_F9: "F9",
-            Qt.Key_F10: "F10", Qt.Key_F11: "F11", Qt.Key_F12: "F12",
-            Qt.Key_Home: "Home", Qt.Key_End: "End",
-            Qt.Key_PageUp: "PageUp", Qt.Key_PageDown: "PageDown",
-            Qt.Key_Insert: "Insert",
-            Qt.Key_Left: "Left", Qt.Key_Right: "Right",
-            Qt.Key_Up: "Up", Qt.Key_Down: "Down",
-            Qt.Key_QuoteLeft: "`", Qt.Key_Minus: "-", Qt.Key_Equal: "=",
-            Qt.Key_BracketLeft: "[", Qt.Key_BracketRight: "]",
-            Qt.Key_Backslash: "\\", Qt.Key_Semicolon: ";",
-            Qt.Key_Apostrophe: "'", Qt.Key_Comma: ",",
-            Qt.Key_Period: ".", Qt.Key_Slash: "/",
-        }
-
-        key_text = special_keys.get(key, "")
-        if not key_text and Qt.Key_A <= key <= Qt.Key_Z:
-            key_text = chr(key)
-        elif not key_text and Qt.Key_0 <= key <= Qt.Key_9:
-            key_text = chr(key)
-
-        if key_text:
-            parts.append(key_text)
-            self.captured_hotkey = "+".join(parts)
-            self._display.setText(self.captured_hotkey)

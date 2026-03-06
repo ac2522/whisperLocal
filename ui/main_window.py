@@ -82,6 +82,10 @@ _CHAR_TO_EVDEV = {
     'f4': ec.KEY_F4, 'f5': ec.KEY_F5, 'f6': ec.KEY_F6,
     'f7': ec.KEY_F7, 'f8': ec.KEY_F8, 'f9': ec.KEY_F9,
     'f10': ec.KEY_F10, 'f11': ec.KEY_F11, 'f12': ec.KEY_F12,
+    'mute': ec.KEY_MUTE,
+    'volumeup': ec.KEY_VOLUMEUP, 'volumedown': ec.KEY_VOLUMEDOWN,
+    'playpause': ec.KEY_PLAYPAUSE, 'nextsong': ec.KEY_NEXTSONG,
+    'previoussong': ec.KEY_PREVIOUSSONG,
 }
 
 _EVDEV_MODIFIERS = {
