@@ -131,6 +131,7 @@ class MainWindow(QWidget):
 
         self.is_quitting = False
         self.is_transcribing = False
+        self._settings_dialog_open = False
         self._keyboard_dev_path = _find_keyboard_device()
         self.last_clicked_button = None
         self.max_transcripts = 10
@@ -500,6 +501,10 @@ class MainWindow(QWidget):
         if self.is_transcribing:
             return
 
+        # If settings dialog is open, ignore hotkey
+        if self._settings_dialog_open:
+            return
+
         if self.engine is None or not self.engine.is_loaded():
             self.error_signal.emit("No model loaded. Please download or select a model in Settings.")
             return
@@ -581,12 +586,15 @@ class MainWindow(QWidget):
 
     def _open_settings(self):
         """Open the settings dialog. On accept, apply changes."""
+        self._settings_dialog_open = True
         old_model = self.settings.get('model_size')
         old_device = self.settings.get('audio_device_index')
         old_backend = self.settings.get('compute_backend')
 
         dialog = SettingsDialog(self.settings, self.model_manager, self.device_manager, parent=self)
-        if dialog.exec_() == SettingsDialog.Accepted:
+        result = dialog.exec_()
+        self._settings_dialog_open = False
+        if result == SettingsDialog.Accepted:
             new_model = self.settings.get('model_size')
             new_device = self.settings.get('audio_device_index')
             new_backend = self.settings.get('compute_backend')

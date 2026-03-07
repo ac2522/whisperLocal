@@ -19,11 +19,8 @@ def main():
 
     lock = ProcessLock(LOCK_FILE)
     if not lock.acquire():
-        from PyQt5.QtWidgets import QApplication, QMessageBox
-        app = QApplication(sys.argv)
-        QMessageBox.warning(None, "Already Running",
-                          "Another instance of Speech to Text is already running.")
-        sys.exit(1)
+        # Exit with 0 so systemd doesn't treat this as a crash and restart
+        sys.exit(0)
 
     try:
         from PyQt5.QtWidgets import QApplication
