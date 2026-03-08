@@ -102,7 +102,13 @@ class Recorder:
         if self._device_index is not None:
             stream_kwargs["input_device_index"] = self._device_index
 
-        stream = self._pa.open(**stream_kwargs)
+        try:
+            stream = self._pa.open(**stream_kwargs)
+        except Exception:
+            with self._lock:
+                self._recording = False
+            raise
+
         frames: list[bytes] = []
 
         try:
@@ -110,8 +116,13 @@ class Recorder:
                 data = stream.read(chunk, exception_on_overflow=False)
                 frames.append(data)
         finally:
-            stream.stop_stream()
-            stream.close()
+            with self._lock:
+                self._recording = False
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
 
         raw = b"".join(frames)
         return self._to_float32(raw, hw_rate)
@@ -160,7 +171,13 @@ class Recorder:
         if self._device_index is not None:
             stream_kwargs["input_device_index"] = self._device_index
 
-        stream = self._pa.open(**stream_kwargs)
+        try:
+            stream = self._pa.open(**stream_kwargs)
+        except Exception:
+            with self._lock:
+                self._recording = False
+            raise
+
         frames: list[bytes] = []
 
         speech_detected = False
@@ -191,11 +208,13 @@ class Recorder:
                     if silent_chunks >= silence_threshold:
                         break
         finally:
-            stream.stop_stream()
-            stream.close()
-
-        with self._lock:
-            self._recording = False
+            with self._lock:
+                self._recording = False
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
 
         raw = b"".join(frames)
         return self._to_float32(raw, hw_rate)
@@ -213,6 +232,8 @@ class Recorder:
 
     def cleanup(self):
         """Terminate PyAudio.  Safe to call more than once."""
+        with self._lock:
+            self._recording = False
         if self._pa is not None:
             try:
                 self._pa.terminate()
