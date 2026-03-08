@@ -1,10 +1,13 @@
 """Audio recording module with button-mode and silence-detection modes."""
 
+import logging
 import threading
 
 import numpy as np
 import pyaudio
 import webrtcvad
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -13,6 +16,32 @@ WHISPER_RATE = 16000          # Whisper expects 16 kHz audio
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 CHUNK_DURATION_MS = 30
+
+
+def _validate_device(pa: pyaudio.PyAudio, device_index: int | None) -> int | None:
+    """Validate that device_index is a usable input device.
+
+    Returns the device_index if valid, or None (system default) if the device
+    doesn't exist or can't be used for mono input.  This prevents PortAudio
+    native crashes (SEGV) that occur when open() is called with an invalid device.
+    """
+    if device_index is None:
+        return None
+    try:
+        info = pa.get_device_info_by_index(device_index)
+        if info.get("maxInputChannels", 0) < CHANNELS:
+            logger.warning(
+                "Device %d (%s) has no input channels, falling back to default",
+                device_index, info.get("name", "unknown"),
+            )
+            return None
+        return device_index
+    except Exception as e:
+        logger.warning(
+            "Device index %d is invalid (%s), falling back to default",
+            device_index, e,
+        )
+        return None
 
 
 def _pick_sample_rate(pa: pyaudio.PyAudio, device_index: int | None) -> int:
@@ -57,10 +86,10 @@ class Recorder:
 
     def __init__(self, device_index=None):
         self._pa = pyaudio.PyAudio()
-        self._device_index = device_index
+        self._device_index = _validate_device(self._pa, device_index)
         self._recording = False
         self._lock = threading.Lock()
-        self._hw_rate = _pick_sample_rate(self._pa, device_index)
+        self._hw_rate = _pick_sample_rate(self._pa, self._device_index)
 
     # ------------------------------------------------------------------
     # Thread-safe recording flag
