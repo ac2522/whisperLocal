@@ -98,14 +98,36 @@ _EVDEV_MODIFIERS = {
 _EVDEV_TO_CHAR = {v: k for k, v in _CHAR_TO_EVDEV.items()}
 
 
-def _find_keyboard_device():
-    """Find the primary keyboard input device."""
+def _find_keyboard_devices():
+    """Find all keyboard input devices.
+
+    Returns paths for devices that have KEY_A capability but are not mice.
+    Mice are identified by having EV_REL (relative axes) or BTN_LEFT.
+    If no pure keyboards are found, falls back to any device with KEY_A
+    (some advanced mice report full key capabilities).
+    """
+    EV_KEY = 1
+    EV_REL = 2
+    BTN_LEFT = 0x110
+
+    keyboards = []
+    fallbacks = []
     for path in evdev.list_devices():
         dev = evdev.InputDevice(path)
         caps = dev.capabilities()
-        if 1 in caps and ec.KEY_A in caps[1]:
-            return dev.path
-    return None
+
+        if EV_KEY not in caps or ec.KEY_A not in caps[EV_KEY]:
+            dev.close()
+            continue
+
+        is_mouse = EV_REL in caps or (EV_KEY in caps and BTN_LEFT in caps[EV_KEY])
+        if is_mouse:
+            fallbacks.append(dev.path)
+        else:
+            keyboards.append(dev.path)
+        dev.close()
+
+    return keyboards if keyboards else fallbacks
 
 
 class MainWindow(QWidget):
@@ -132,10 +154,10 @@ class MainWindow(QWidget):
         self.is_quitting = False
         self.is_transcribing = False
         self._settings_dialog_open = False
-        self._keyboard_dev_path = _find_keyboard_device()
+        self._keyboard_dev_paths = _find_keyboard_devices()
         self.last_clicked_button = None
         self.max_transcripts = 10
-        self._hotkey_device = None
+        self._hotkey_devices = []
         self._hotkey_stop_event = threading.Event()
         self._hotkey_thread = None
 
@@ -664,7 +686,11 @@ class MainWindow(QWidget):
         return modifiers, key_char
 
     def _start_hotkey_listener(self):
-        """Start a global hotkey listener using evdev (works on Wayland)."""
+        """Start a global hotkey listener using evdev (works on Wayland).
+
+        Listens on ALL detected keyboard devices simultaneously so the hotkey
+        works regardless of which keyboard is used.
+        """
         stop_event = self._hotkey_stop_event
 
         hotkey_str = self.settings.get('hotkey', 'Ctrl+Alt+Shift+L')
@@ -675,60 +701,66 @@ class MainWindow(QWidget):
             logger.error("Unknown hotkey character: %s", self._hotkey_char)
             return
 
-        dev_path = self._keyboard_dev_path
-        if not dev_path:
-            logger.error("No keyboard device found for hotkey listener")
+        dev_paths = self._keyboard_dev_paths
+        if not dev_paths:
+            logger.error("No keyboard devices found for hotkey listener")
             return
 
-        logger.info("Hotkey listener starting (evdev %s), target=%s+%s (keycode=%d)",
-                     dev_path, self._hotkey_modifiers, self._hotkey_char, target_keycode)
+        devices = []
+        for path in dev_paths:
+            try:
+                devices.append(evdev.InputDevice(path))
+            except Exception as e:
+                logger.warning("Failed to open keyboard device %s: %s", path, e)
+
+        if not devices:
+            logger.error("Could not open any keyboard device")
+            return
+
+        self._hotkey_devices = devices
+        dev_names = ", ".join(f"{d.path} ({d.name})" for d in devices)
+        logger.info("Hotkey listener starting on [%s], target=%s+%s (keycode=%d)",
+                     dev_names, self._hotkey_modifiers, self._hotkey_char, target_keycode)
 
         active_mods = set()
 
-        try:
-            dev = evdev.InputDevice(dev_path)
-        except Exception as e:
-            logger.error("Failed to open keyboard device %s: %s", dev_path, e)
-            return
-
-        self._hotkey_device = dev
-
         while not self.is_quitting and not stop_event.is_set():
             try:
-                r, _, _ = select.select([dev], [], [], 0.5)
+                r, _, _ = select.select(devices, [], [], 0.5)
                 if stop_event.is_set():
                     break
                 if not r:
                     continue
-                for event in dev.read():
-                    if event.type != 1:  # EV_KEY
-                        continue
-                    code = event.code
-                    value = event.value  # 1=press, 0=release, 2=repeat
+                for dev in r:
+                    for event in dev.read():
+                        if event.type != 1:  # EV_KEY
+                            continue
+                        code = event.code
+                        value = event.value  # 1=press, 0=release, 2=repeat
 
-                    # Track modifiers
-                    mod_name = _EVDEV_MODIFIERS.get(code)
-                    if mod_name:
-                        if value >= 1:
-                            active_mods.add(mod_name)
-                        else:
-                            active_mods.discard(mod_name)
-                        continue
+                        # Track modifiers
+                        mod_name = _EVDEV_MODIFIERS.get(code)
+                        if mod_name:
+                            if value >= 1:
+                                active_mods.add(mod_name)
+                            else:
+                                active_mods.discard(mod_name)
+                            continue
 
-                    # Check for hotkey on press (not repeat)
-                    if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
-                        logger.info("Hotkey triggered!")
-                        self.hotkey_signal.emit()
+                        # Check for hotkey on press (not repeat)
+                        if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
+                            logger.info("Hotkey triggered!")
+                            self.hotkey_signal.emit()
             except Exception as e:
                 if not self.is_quitting and not stop_event.is_set():
                     logger.error("Error in hotkey listener: %s", e, exc_info=True)
                 break
 
-        # Clean up the device when this thread exits
-        try:
-            dev.close()
-        except Exception:
-            pass
+        for dev in devices:
+            try:
+                dev.close()
+            except Exception:
+                pass
         logger.info("Hotkey listener stopped")
 
     def _reload_hotkey(self):
