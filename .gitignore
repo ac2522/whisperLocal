@@ -42,8 +42,13 @@ temp_audio.*
 *.swo
 *~
 
-# Models (large binary files)
+# Models (large binary files — never commit these)
 models/*.bin
+*.bin
+*.ggml
+
+# Machine-specific setup files
+setup_commands.txt
 
 # Worktrees
 .worktrees/
