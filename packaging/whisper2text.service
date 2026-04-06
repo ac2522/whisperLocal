@@ -1,5 +1,5 @@
 [Unit]
-Description=Speech to Text (whisper2text)
+Description=whisperLocal
 After=graphical-session.target
 PartOf=graphical-session.target
 StartLimitBurst=5
@@ -10,7 +10,6 @@ Type=simple
 ExecStart=%h/.local/share/whisperLocal/whisper2text
 Restart=on-failure
 RestartSec=3
-Environment=QT_QPA_PLATFORM=wayland
 
 [Install]
 WantedBy=graphical-session.target

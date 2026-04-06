@@ -14,10 +14,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS = {
     'model_size': 'base',
+    'compute_backend': 'auto',
     'vad_aggressiveness': 1,
     'padding_duration_ms': 1000,
     'recording_mode': 'silence',
     'break_length': 5,
+    'hotkey': 'Ctrl+Alt+Shift+L',
     'auto_paste': False,
     'transcripts': [],
     'audio_device_index': None,

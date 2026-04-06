@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
 )
 from PyQt5.QtGui import QFont, QTextCursor
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 
 
 class QtLogHandler(logging.Handler):
@@ -19,7 +19,9 @@ class QtLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            self.panel.append_log(msg, record.levelno)
+            # Use signal to marshal to the GUI thread (direct calls from
+            # background threads cause SEGV in Qt).
+            self.panel._log_signal.emit(msg, record.levelno)
         except Exception:
             self.handleError(record)
 
@@ -31,6 +33,8 @@ class ErrorPanel(QWidget):
     ``logger.info()`` / ``logger.error()`` call from *any* module is
     automatically captured and displayed inside the panel's text area.
     """
+
+    _log_signal = pyqtSignal(str, int)
 
     MAX_ENTRIES = 50
 
@@ -79,6 +83,9 @@ class ErrorPanel(QWidget):
         layout.addLayout(header_layout)
         layout.addWidget(self._text_edit)
         self.setLayout(layout)
+
+        # --- Connect log signal to append_log on the GUI thread -------------
+        self._log_signal.connect(self.append_log)
 
         # --- Install logging handler ---------------------------------------
         self._install_log_handler()

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Speech to Text
+Name=whisperLocal
 Comment=Local speech-to-text using Whisper
 Exec=%HOME%/.local/share/whisperLocal/whisper2text
 Icon=%HOME%/.local/share/whisperLocal/whisper2text.png

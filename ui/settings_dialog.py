@@ -217,6 +217,7 @@ class SettingsDialog(QDialog):
 
         vbox.addWidget(QLabel("Backend"))
         self._compute_combo = QComboBox()
+        self._compute_combo.addItem("Auto (Recommended)", "auto")
         self._compute_combo.addItem("CPU", "cpu")
 
         # Detect available GPU backends from pywhispercpp shared libs
@@ -234,7 +235,7 @@ class SettingsDialog(QDialog):
             pass
 
         # Select saved backend
-        saved = self._settings.get("compute_backend", "vulkan")
+        saved = self._settings.get("compute_backend", "auto")
         idx = self._compute_combo.findData(saved)
         if idx >= 0:
             self._compute_combo.setCurrentIndex(idx)
@@ -388,5 +389,4 @@ class SettingsDialog(QDialog):
 
         self._settings.save()
         self.accept()
-
 

@@ -6,6 +6,7 @@ sub-modules.
 """
 
 import atexit
+import importlib.util
 import logging
 import os
 import platform
@@ -36,7 +37,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
 
 import shutil
 
@@ -110,10 +111,20 @@ def _find_keyboard_devices():
     EV_REL = 2
     BTN_LEFT = 0x110
 
+    try:
+        all_devices = evdev.list_devices()
+    except Exception as e:
+        logger.warning("Cannot enumerate input devices: %s", e)
+        return []
+
     keyboards = []
     fallbacks = []
-    for path in evdev.list_devices():
-        dev = evdev.InputDevice(path)
+    for path in all_devices:
+        try:
+            dev = evdev.InputDevice(path)
+        except (PermissionError, OSError) as e:
+            logger.debug("Cannot open %s: %s", path, e)
+            continue
         caps = dev.capabilities()
 
         if EV_KEY not in caps or ec.KEY_A not in caps[EV_KEY]:
@@ -131,7 +142,7 @@ def _find_keyboard_devices():
 
 
 class MainWindow(QWidget):
-    """Main application window for Speech to Text.
+    """Main application window for whisperLocal.
 
     Integrates SettingsManager, ModelManager, DeviceManager, WhisperEngine,
     Recorder, ErrorPanel, and SettingsDialog into a single cohesive window.
@@ -147,11 +158,12 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Speech to Text")
+        self.setWindowTitle("whisperLocal")
         self.setWindowIcon(QIcon(ICON_NORMAL))
         self.resize(400, 600)
 
         self.is_quitting = False
+        self._quit_requested = False
         self.is_transcribing = False
         self._settings_dialog_open = False
         self._keyboard_dev_paths = _find_keyboard_devices()
@@ -160,6 +172,7 @@ class MainWindow(QWidget):
         self._hotkey_devices = []
         self._hotkey_stop_event = threading.Event()
         self._hotkey_thread = None
+        self.tray_icon = None
 
         # --- Core managers ---
         self.settings = SettingsManager()
@@ -199,6 +212,14 @@ class MainWindow(QWidget):
         signal.signal(signal.SIGTERM, self._signal_handler)
         sys.excepthook = self._handle_exception
 
+        # --- Signal-safe quit timer ---
+        # POSIX signal handlers cannot safely call Qt methods.
+        # _signal_handler sets _quit_requested; this timer picks it up.
+        self._signal_timer = QTimer(self)
+        self._signal_timer.setInterval(250)
+        self._signal_timer.timeout.connect(self._check_quit_requested)
+        self._signal_timer.start()
+
     # ------------------------------------------------------------------
     # Engine initialisation
     # ------------------------------------------------------------------
@@ -210,7 +231,6 @@ class MainWindow(QWidget):
         Falls back to any available model if the saved one is not found.
         Returns None if no models are available.
         """
-        self._apply_compute_backend()
         model_size = self.settings.get('model_size')
 
         # Handle old format: if model_size doesn't end in '.bin', convert it
@@ -223,7 +243,7 @@ class MainWindow(QWidget):
         if model_size:
             try:
                 model_path = self.model_manager.get_model_path(model_size)
-                return WhisperEngine(model_path)
+                return self._create_engine(model_path)
             except FileNotFoundError:
                 logger.warning("Saved model '%s' not found, trying fallback", model_size)
             except Exception:
@@ -237,7 +257,7 @@ class MainWindow(QWidget):
             self.settings.set('model_size', first['name'])
             self.settings.save()
             try:
-                return WhisperEngine(first['path'])
+                return self._create_engine(first['path'])
             except Exception:
                 logger.error("Failed to load fallback model '%s'", first['name'], exc_info=True)
 
@@ -306,20 +326,81 @@ class MainWindow(QWidget):
         self.error_panel = ErrorPanel(self)
         main_layout.addWidget(self.error_panel)
 
+    def _resolve_compute_backend(self, backend: str | None = None) -> str:
+        """Resolve requested backend into an available backend on this machine."""
+        requested = (backend or self.settings.get('compute_backend', 'auto') or 'auto').lower()
+        available = {'cpu'}
+        try:
+            spec = importlib.util.find_spec('_pywhispercpp')
+            if spec and spec.origin:
+                lib_dir = os.path.dirname(spec.origin)
+                for name in os.listdir(lib_dir):
+                    low = name.lower()
+                    if 'cuda' in low:
+                        available.add('cuda')
+                    if 'vulkan' in low:
+                        available.add('vulkan')
+        except Exception:
+            pass
+
+        if requested == 'auto':
+            if 'cuda' in available and shutil.which('nvidia-smi'):
+                return 'cuda'
+            if 'vulkan' in available:
+                return 'vulkan'
+            return 'cpu'
+
+        if requested == 'cuda' and not shutil.which('nvidia-smi'):
+            return 'cpu'
+        if requested not in available:
+            return 'cpu'
+        return requested
+
     def _apply_compute_backend(self):
         """Set environment variables to control GPU usage based on settings."""
-        backend = self.settings.get('compute_backend', 'cpu')
-        if backend == 'cpu':
+        resolved = self._resolve_compute_backend()
+        self._active_compute_backend = resolved
+
+        if resolved == 'cpu':
             os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            os.environ['GGML_VK_DISABLE'] = '1'
+        elif resolved == 'vulkan':
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            os.environ.pop('GGML_VK_DISABLE', None)
         else:
             os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+            os.environ.pop('GGML_VK_DISABLE', None)
+
+    def _create_engine(self, model_path: str):
+        """Create WhisperEngine and fallback to CPU if GPU backend fails."""
+        requested = (self.settings.get('compute_backend', 'auto') or 'auto').lower()
+        self._apply_compute_backend()
+        try:
+            return WhisperEngine(model_path)
+        except Exception:
+            if getattr(self, '_active_compute_backend', 'cpu') == 'cpu':
+                raise
+            logger.warning(
+                "Whisper engine failed on backend '%s', retrying on CPU",
+                self._active_compute_backend,
+                exc_info=True,
+            )
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            os.environ['GGML_VK_DISABLE'] = '1'
+            self._active_compute_backend = 'cpu'
+            if requested != 'auto':
+                self.settings.set('compute_backend', 'cpu')
+                self.settings.save()
+            return WhisperEngine(model_path)
 
     def _detect_compute_backend(self):
         """Detect the active compute backend."""
-        backend = self.settings.get('compute_backend', 'cpu')
+        backend = getattr(self, '_active_compute_backend', None)
+        if backend is None:
+            backend = self._resolve_compute_backend()
         if backend == 'vulkan':
             return "Vulkan"
-        elif backend == 'cuda':
+        if backend == 'cuda':
             return "CUDA"
         return "CPU"
 
@@ -429,6 +510,13 @@ class MainWindow(QWidget):
 
     def _setup_tray(self):
         """Set up the system tray icon and its context menu."""
+        self.record_action = QAction("Start Recording", self)
+        self.record_action.triggered.connect(self._toggle_recording)
+
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray is not available in this session")
+            return
+
         self.tray_icon = QSystemTrayIcon(self)
 
         if os.path.exists(ICON_TRAY_NORMAL):
@@ -436,7 +524,7 @@ class MainWindow(QWidget):
         else:
             self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
 
-        self.tray_icon.setToolTip("Speech to Text")
+        self.tray_icon.setToolTip("whisperLocal")
 
         # Menu
         self.tray_menu = QMenu()
@@ -446,9 +534,6 @@ class MainWindow(QWidget):
 
         self.hide_action = QAction("Hide", self)
         self.hide_action.triggered.connect(self.hide)
-
-        self.record_action = QAction("Start Recording", self)
-        self.record_action.triggered.connect(self._toggle_recording)
 
         self.settings_action = QAction("Settings", self)
         self.settings_action.triggered.connect(self._open_settings)
@@ -489,8 +574,16 @@ class MainWindow(QWidget):
             window_path = ICON_NORMAL
             fallback = self.style().standardIcon(QStyle.SP_MediaPlay)
 
-        self.tray_icon.setIcon(QIcon(tray_path) if os.path.exists(tray_path) else fallback)
-        self.setWindowIcon(QIcon(window_path) if os.path.exists(window_path) else fallback)
+        if self.tray_icon is not None:
+            self.tray_icon.setIcon(QIcon(tray_path) if os.path.exists(tray_path) else fallback)
+
+        icon = QIcon(window_path) if os.path.exists(window_path) else fallback
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
+        self.setWindowIcon(icon)
+        if self.windowHandle() is not None:
+            self.windowHandle().setIcon(icon)
 
         # Overwrite the dash icon file so GNOME picks up the change
         try:
@@ -503,10 +596,12 @@ class MainWindow(QWidget):
         """Update the tray record action text and tooltip."""
         if self.recorder.is_recording:
             self.record_action.setText("Stop Recording")
-            self.tray_icon.setToolTip("Speech to Text (Recording...)")
+            if self.tray_icon is not None:
+                self.tray_icon.setToolTip("whisperLocal (Recording...)")
         else:
             self.record_action.setText("Start Recording")
-            self.tray_icon.setToolTip("Speech to Text")
+            if self.tray_icon is not None:
+                self.tray_icon.setToolTip("whisperLocal")
 
     # ------------------------------------------------------------------
     # Recording
@@ -536,18 +631,12 @@ class MainWindow(QWidget):
         self.record_button.setText('Stop Recording')
         self.record_button.setEnabled(True)  # Keep enabled so user can click to stop
         self.record_action.setText("Stop Recording")
-        self.tray_icon.setToolTip("Speech to Text (Recording...)")
+        if self.tray_icon is not None:
+            self.tray_icon.setToolTip("whisperLocal (Recording...)")
         # Set red icons immediately (before recording thread starts)
-        if os.path.exists(ICON_TRAY_RECORDING):
+        if self.tray_icon is not None and os.path.exists(ICON_TRAY_RECORDING):
             self.tray_icon.setIcon(QIcon(ICON_TRAY_RECORDING))
-        self.setWindowIcon(QIcon(ICON_RECORDING) if os.path.exists(ICON_RECORDING)
-                           else self.style().standardIcon(QStyle.SP_MediaStop))
-        # Overwrite dash icon to red
-        try:
-            if os.path.exists(ICON_RECORDING) and os.path.exists(ICON_DASH):
-                shutil.copy2(ICON_RECORDING, ICON_DASH)
-        except Exception:
-            pass
+        self._update_tray_icon()
 
         if recording_mode == 'button':
             threading.Thread(target=self._record_button, daemon=True).start()
@@ -623,7 +712,6 @@ class MainWindow(QWidget):
 
             # Reload engine if model or compute backend changed
             if new_model != old_model or new_backend != old_backend:
-                self._apply_compute_backend()
                 threading.Thread(target=self._reload_engine, daemon=True).start()
 
             # Recreate recorder if device changed
@@ -649,12 +737,13 @@ class MainWindow(QWidget):
             return
 
         try:
-            if self.engine is not None and self.engine.is_loaded():
-                self.update_status_signal.emit("Reloading model...")
-                self.engine.reload(model_path)
-            else:
-                self.update_status_signal.emit("Loading model...")
-                self.engine = WhisperEngine(model_path)
+            self.update_status_signal.emit(
+                "Reloading model..." if self.engine is not None and self.engine.is_loaded()
+                else "Loading model..."
+            )
+            if self.engine is not None:
+                self.engine.unload()
+            self.engine = self._create_engine(model_path)
             self.update_status_signal.emit("")
             logger.info("Engine reloaded with model '%s'", model_name)
         except Exception as e:
@@ -703,7 +792,12 @@ class MainWindow(QWidget):
 
         dev_paths = self._keyboard_dev_paths
         if not dev_paths:
-            logger.error("No keyboard devices found for hotkey listener")
+            logger.warning(
+                "No keyboard devices found for hotkey listener. "
+                "Global hotkey is disabled. To enable it, add your user to "
+                "the 'input' group:  sudo usermod -aG input $USER  "
+                "(then log out and back in)."
+            )
             return
 
         devices = []
@@ -790,6 +884,12 @@ class MainWindow(QWidget):
         text length.  ydotool injects keystrokes at the kernel level via
         /dev/uinput, which works on both Wayland and X11.
         """
+        if not shutil.which('ydotool'):
+            logger.warning(
+                "Auto-paste requires ydotool but it is not installed. "
+                "Install with: sudo apt install ydotool"
+            )
+            return
         try:
             time.sleep(0.05)
             subprocess.run(
@@ -848,7 +948,8 @@ class MainWindow(QWidget):
         """Gracefully shut down the application."""
         self.is_quitting = True
         self._hotkey_stop_event.set()
-        self.tray_icon.hide()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         self._cleanup()
         if self._hotkey_thread and self._hotkey_thread.is_alive():
             self._hotkey_thread.join(timeout=2)
@@ -859,14 +960,23 @@ class MainWindow(QWidget):
         """Handle the window close event."""
         self.is_quitting = True
         self._hotkey_stop_event.set()
-        self.tray_icon.hide()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         self._cleanup()
         if self._hotkey_thread and self._hotkey_thread.is_alive():
             self._hotkey_thread.join(timeout=2)
         event.accept()
 
+    def _check_quit_requested(self):
+        """Called by QTimer — safely invokes _quit on the main thread."""
+        if self._quit_requested:
+            self._quit_requested = False
+            self._quit()
+
     def _signal_handler(self, signum, frame):
-        """Handle SIGINT/SIGTERM by triggering quit."""
-        self._quit()
+        """Handle SIGINT/SIGTERM by scheduling a quit on the Qt event loop.
 
-
+        Calling Qt methods directly from a POSIX signal handler is unsafe
+        and causes SEGV.  Instead, set a flag and let a QTimer pick it up.
+        """
+        self._quit_requested = True

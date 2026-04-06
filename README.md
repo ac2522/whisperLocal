@@ -1,8 +1,8 @@
 # whisperLocal
 
-Local speech-to-text using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with CUDA GPU acceleration. PyQt5 desktop app with system tray, global hotkeys, and auto-paste.
+Local speech-to-text using [whisper.cpp](https://github.com/ggerganov/whisper.cpp). PyQt5 desktop app with system tray, global hotkeys, and auto-paste.
 
-Built for Linux with NVIDIA GPUs. No cloud APIs, everything runs locally.
+Built for Linux with automatic backend fallback (CUDA/Vulkan/CPU). No cloud APIs, everything runs locally.
 
 ## Features
 
@@ -18,10 +18,10 @@ Built for Linux with NVIDIA GPUs. No cloud APIs, everything runs locally.
 
 ## Requirements
 
-- Linux (tested on Ubuntu 24.04)
+- Linux (tested on Ubuntu 22.04 and 24.04)
 - Python 3.10+
-- NVIDIA GPU with CUDA support (falls back to CPU)
-- CUDA toolkit installed
+- Optional NVIDIA GPU with CUDA support (falls back to CPU)
+- Optional CUDA toolkit (only needed for CUDA builds)
 - PortAudio development libraries
 
 ## Installation
@@ -109,7 +109,7 @@ rm -rf ~/.whisper2text
 Access via the gear icon or tray menu:
 
 - **Model**: select from downloaded ggml models (download more in Settings)
-- **Compute backend**: CUDA, Vulkan, or CPU
+- **Compute backend**: Auto (recommended), CUDA, Vulkan, or CPU
 - **Audio device**: select input microphone
 - **Recording mode**: silence detection or manual button
 - **VAD aggressiveness** (0-3): higher = more aggressive noise filtering
