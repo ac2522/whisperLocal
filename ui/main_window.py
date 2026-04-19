@@ -829,7 +829,9 @@ class MainWindow(QWidget):
         """Start a global hotkey listener using evdev (works on Wayland).
 
         Listens on ALL detected keyboard devices simultaneously so the hotkey
-        works regardless of which keyboard is used.
+        works regardless of which keyboard is used.  Survives hotplug:
+        devices that disappear are dropped, and new keyboards are picked
+        up automatically on periodic rescan.
         """
         stop_event = self._hotkey_stop_event
 
@@ -841,71 +843,113 @@ class MainWindow(QWidget):
             logger.error("Unknown hotkey character: %s", self._hotkey_char)
             return
 
-        dev_paths = self._keyboard_dev_paths
-        if not dev_paths:
-            logger.warning(
-                "No keyboard devices found for hotkey listener. "
-                "Global hotkey is disabled. To enable it, add your user to "
-                "the 'input' group:  sudo usermod -aG input $USER  "
-                "(then log out and back in)."
-            )
-            return
+        logger.info(
+            "Hotkey listener starting, target=%s+%s (keycode=%d)",
+            self._hotkey_modifiers, self._hotkey_char, target_keycode,
+        )
 
-        devices = []
-        for path in dev_paths:
-            try:
-                devices.append(evdev.InputDevice(path))
-            except Exception as e:
-                logger.warning("Failed to open keyboard device %s: %s", path, e)
+        # path -> InputDevice
+        devices: dict[str, evdev.InputDevice] = {}
+        active_mods: set[str] = set()
+        last_rescan = 0.0
+        rescan_interval = 2.0  # seconds between rescans
 
-        if not devices:
-            logger.error("Could not open any keyboard device")
-            return
-
-        self._hotkey_devices = devices
-        dev_names = ", ".join(f"{d.path} ({d.name})" for d in devices)
-        logger.info("Hotkey listener starting on [%s], target=%s+%s (keycode=%d)",
-                     dev_names, self._hotkey_modifiers, self._hotkey_char, target_keycode)
-
-        active_mods = set()
+        def rescan():
+            """Open any new keyboards and drop ones that vanished."""
+            current_paths = set(_find_keyboard_devices())
+            # Drop devices that are gone
+            for path in list(devices.keys()):
+                if path not in current_paths:
+                    try:
+                        devices[path].close()
+                    except Exception:
+                        pass
+                    del devices[path]
+                    logger.info("Hotkey: keyboard disconnected: %s", path)
+            # Add new devices
+            for path in current_paths:
+                if path in devices:
+                    continue
+                try:
+                    dev = evdev.InputDevice(path)
+                except Exception as e:
+                    logger.debug("Cannot open %s: %s", path, e)
+                    continue
+                devices[path] = dev
+                logger.info("Hotkey: keyboard connected: %s (%s)", path, dev.name)
+            self._hotkey_devices = list(devices.values())
+            self._keyboard_dev_paths = list(devices.keys())
 
         while not self.is_quitting and not stop_event.is_set():
-            try:
-                r, _, _ = select.select(devices, [], [], 0.5)
-                if stop_event.is_set():
+            now = time.time()
+            if now - last_rescan >= rescan_interval:
+                rescan()
+                last_rescan = now
+
+            if not devices:
+                # Nothing to listen to — wait, then rescan
+                if stop_event.wait(timeout=rescan_interval):
                     break
-                if not r:
-                    continue
-                for dev in r:
-                    for event in dev.read():
-                        if event.type != 1:  # EV_KEY
-                            continue
-                        code = event.code
-                        value = event.value  # 1=press, 0=release, 2=repeat
+                continue
 
-                        # Track modifiers
-                        mod_name = _EVDEV_MODIFIERS.get(code)
-                        if mod_name:
-                            if value >= 1:
-                                active_mods.add(mod_name)
-                            else:
-                                active_mods.discard(mod_name)
-                            continue
-
-                        # Check for hotkey on press (not repeat)
-                        if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
-                            logger.info("Hotkey triggered!")
-                            self.hotkey_signal.emit()
+            try:
+                r, _, _ = select.select(list(devices.values()), [], [], 0.5)
             except Exception as e:
-                if not self.is_quitting and not stop_event.is_set():
-                    logger.error("Error in hotkey listener: %s", e, exc_info=True)
-                break
+                logger.warning("Hotkey select error: %s", e)
+                # Force rescan on next iteration
+                last_rescan = 0.0
+                continue
 
-        for dev in devices:
+            if stop_event.is_set():
+                break
+            if not r:
+                continue
+
+            for dev in r:
+                try:
+                    events = list(dev.read())
+                except OSError as e:
+                    # Device disappeared (errno 19 = ENODEV) or similar
+                    logger.info("Hotkey: device %s removed (%s)", dev.path, e)
+                    try:
+                        dev.close()
+                    except Exception:
+                        pass
+                    devices.pop(dev.path, None)
+                    # Rescan promptly so a reconnect is picked up fast
+                    last_rescan = 0.0
+                    continue
+                except Exception as e:
+                    logger.warning("Hotkey: read error on %s: %s", dev.path, e)
+                    continue
+
+                for event in events:
+                    if event.type != 1:  # EV_KEY
+                        continue
+                    code = event.code
+                    value = event.value  # 1=press, 0=release, 2=repeat
+
+                    # Track modifiers
+                    mod_name = _EVDEV_MODIFIERS.get(code)
+                    if mod_name:
+                        if value >= 1:
+                            active_mods.add(mod_name)
+                        else:
+                            active_mods.discard(mod_name)
+                        continue
+
+                    # Check for hotkey on press (not repeat)
+                    if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
+                        logger.info("Hotkey triggered!")
+                        self.hotkey_signal.emit()
+
+        for dev in devices.values():
             try:
                 dev.close()
             except Exception:
                 pass
+        devices.clear()
+        self._hotkey_devices = []
         logger.info("Hotkey listener stopped")
 
     def _reload_hotkey(self):
