@@ -183,7 +183,7 @@ class MainWindow(QWidget):
         self.engine = self._load_initial_engine()
 
         # --- Create Recorder with saved device ---
-        device_index = self.settings.get('audio_device_index')
+        device_index = self._resolve_audio_device()
         self.recorder = Recorder(device_index=device_index)
 
         # --- Load transcript history ---
@@ -392,6 +392,57 @@ class MainWindow(QWidget):
                 self.settings.set('compute_backend', 'cpu')
                 self.settings.save()
             return WhisperEngine(model_path)
+
+    def _resolve_audio_device(self):
+        """Resolve saved audio device, recovering by name if index is stale.
+
+        PyAudio device indices are not stable across reboots or USB
+        hotplug.  If the saved index now points to a different device
+        (e.g. a Scarlett index became a Thunderbolt index), search by
+        the saved name and update settings.  Returns None to use the
+        system default.
+        """
+        saved_index = self.settings.get('audio_device_index')
+        saved_name = self.settings.get('audio_device_name')
+
+        if saved_index is None:
+            return None
+
+        devices = self.device_manager.list_input_devices()
+        by_index = {d['index']: d for d in devices}
+
+        # If the saved index still exists and matches the saved name, use it
+        if saved_index in by_index:
+            current = by_index[saved_index]
+            if not saved_name or current['name'] == saved_name:
+                return saved_index
+            logger.warning(
+                "Saved audio device index %s now points to '%s' (was '%s')",
+                saved_index, current['name'], saved_name,
+            )
+
+        # Try to find the device by its saved name
+        if saved_name:
+            for d in devices:
+                if d['name'] == saved_name:
+                    logger.info(
+                        "Audio device '%s' moved from index %s to %s",
+                        saved_name, saved_index, d['index'],
+                    )
+                    self.settings.set('audio_device_index', d['index'])
+                    self.settings.save()
+                    return d['index']
+
+        # Device is gone — fall back to system default
+        logger.warning(
+            "Saved audio device '%s' (index %s) not found. "
+            "Falling back to System Default.",
+            saved_name or '?', saved_index,
+        )
+        self.settings.set('audio_device_index', None)
+        self.settings.set('audio_device_name', None)
+        self.settings.save()
+        return None
 
     def _detect_compute_backend(self):
         """Detect the active compute backend."""
