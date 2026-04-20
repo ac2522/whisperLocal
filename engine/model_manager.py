@@ -1,6 +1,8 @@
 """Model manager for downloading and managing Whisper GGML model files."""
 
+import glob
 import os
+import shutil
 import urllib.request
 
 AVAILABLE_MODELS = [
@@ -80,29 +82,43 @@ class ModelManager:
     # ------------------------------------------------------------------
 
     def list_downloaded(self) -> list[dict]:
-        """Return a list of dicts for every .bin file present in *models_dir*.
+        """Return a list of dicts for every downloaded model.
 
-        Each dict has keys: name, path, size_mb, description.
+        Recognizes two on-disk shapes:
+          * Whisper: any single ``.bin`` file in ``models_dir``.
+          * Parakeet: any subdirectory containing ``encoder-model*.onnx``.
+
+        Each dict has keys: name, path, size_mb, description, type.
         """
         results = []
         for filename in sorted(os.listdir(self.models_dir)):
-            if not filename.endswith(".bin"):
-                continue
-            filepath = os.path.join(self.models_dir, filename)
-            if not os.path.isfile(filepath):
-                continue
-            size_bytes = os.path.getsize(filepath)
-            size_mb = round(size_bytes / (1024 * 1024), 1)
+            full_path = os.path.join(self.models_dir, filename)
 
-            # Try to get description from known models, otherwise generic.
+            if os.path.isfile(full_path) and filename.endswith(".bin"):
+                size_bytes = os.path.getsize(full_path)
+                model_type = "whisper"
+            elif os.path.isdir(full_path) and glob.glob(
+                os.path.join(full_path, "encoder-model*.onnx")
+            ):
+                size_bytes = sum(
+                    os.path.getsize(os.path.join(dirpath, f))
+                    for dirpath, _, files in os.walk(full_path)
+                    for f in files
+                )
+                model_type = "parakeet"
+            else:
+                continue
+
+            size_mb = round(size_bytes / (1024 * 1024), 1)
             known = _MODELS_BY_NAME.get(filename)
             description = known["description"] if known else filename
 
             results.append({
                 "name": filename,
-                "path": filepath,
+                "path": full_path,
                 "size_mb": size_mb,
                 "description": description,
+                "type": model_type,
             })
         return results
 
@@ -115,16 +131,17 @@ class ModelManager:
         return [dict(m) for m in AVAILABLE_MODELS]
 
     def is_downloaded(self, model_name: str) -> bool:
-        """Return *True* if *model_name* exists in *models_dir*."""
-        return os.path.isfile(os.path.join(self.models_dir, model_name))
+        """Return True if ``model_name`` exists as a file or directory."""
+        path = os.path.join(self.models_dir, model_name)
+        return os.path.isfile(path) or os.path.isdir(path)
 
     def get_model_path(self, model_name: str) -> str:
-        """Return the full path for *model_name*.
+        """Return the full path for ``model_name`` (file or directory).
 
         Raises ``FileNotFoundError`` if the model has not been downloaded.
         """
         path = os.path.join(self.models_dir, model_name)
-        if not os.path.isfile(path):
+        if not (os.path.isfile(path) or os.path.isdir(path)):
             raise FileNotFoundError(
                 f"Model '{model_name}' not found in {self.models_dir}"
             )
@@ -135,10 +152,12 @@ class ModelManager:
     # ------------------------------------------------------------------
 
     def delete_model(self, model_name: str) -> None:
-        """Delete the model file from *models_dir*."""
+        """Delete the model file or directory from ``models_dir``."""
         path = os.path.join(self.models_dir, model_name)
         if os.path.isfile(path):
             os.remove(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
 
     def download_model(self, model_name: str, progress_callback=None) -> str:
         """Download *model_name* from HuggingFace into *models_dir*.
