@@ -161,3 +161,30 @@ class TestGetActiveProvider:
         del fake.get_providers
         engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
         assert engine.get_active_provider() is None
+
+
+class TestParakeetEngineVocabulary:
+    def test_no_vocabulary_leaves_output_unchanged(self, mock_load_model):
+        _, fake = mock_load_model
+        fake.recognize.return_value = "visit avrilo today"
+        engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
+        text = engine.transcribe(np.zeros(16000, dtype=np.float32))
+        assert text == "visit avrilo today"
+
+    def test_empty_vocabulary_leaves_output_unchanged(self, mock_load_model):
+        _, fake = mock_load_model
+        fake.recognize.return_value = "visit avrilo today"
+        engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
+        text = engine.transcribe(np.zeros(16000, dtype=np.float32), vocabulary=[])
+        assert text == "visit avrilo today"
+
+    def test_vocabulary_applies_fuzzy_substitution(self, mock_load_model):
+        _, fake = mock_load_model
+        fake.recognize.return_value = "visit avrilo today"
+        engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
+        text = engine.transcribe(
+            np.zeros(16000, dtype=np.float32),
+            vocabulary=["Avrillo"],
+        )
+        assert "avrillo" in text  # case-preserved lowercase substitution
+        assert "avrilo" not in text

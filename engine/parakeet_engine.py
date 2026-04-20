@@ -13,6 +13,8 @@ import re
 import numpy as np
 import onnx_asr
 
+from engine.vocabulary import apply_post_substitution
+
 logger = logging.getLogger(__name__)
 
 # onnx-asr expects an architecture identifier; we infer it from the
@@ -89,7 +91,25 @@ class ParakeetEngine:
         self._model_path = model_path
         self._load(model_path)
 
-    def transcribe(self, audio_data) -> str:
+    def transcribe(
+        self, audio_data, *, vocabulary: list[str] | None = None
+    ) -> str:
+        """Transcribe audio data and return the full text.
+
+        Parameters
+        ----------
+        audio_data : numpy.ndarray or bytes
+            Audio samples; see WhisperEngine.transcribe for accepted types.
+        vocabulary : list[str] or None, optional
+            Domain-specific words applied via fuzzy post-substitution on
+            Parakeet's output. Parakeet has no prompt-biasing hook, so
+            this is a best-effort correction rather than real biasing.
+
+        Returns
+        -------
+        str
+            Cleaned transcript text.
+        """
         if self._model is None:
             raise RuntimeError("No model loaded")
 
@@ -106,6 +126,7 @@ class ParakeetEngine:
         if isinstance(result, list):
             result = result[0] if result else ""
         text = str(result)
+        text = apply_post_substitution(text, vocabulary)
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
