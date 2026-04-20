@@ -8,6 +8,8 @@ import re
 import numpy as np
 from pywhispercpp.model import Model
 
+from engine.vocabulary import build_whisper_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,21 +89,24 @@ class WhisperEngine:
             self._language = language
         self._load_model(model_path)
 
-    def transcribe(self, audio_data) -> str:
+    def transcribe(self, audio_data, *, vocabulary: list[str] | None = None) -> str:
         """Transcribe audio data and return the full text.
 
         Parameters
         ----------
         audio_data : numpy.ndarray or bytes
-            If a numpy ``float32`` array, used directly.  If ``bytes``
-            (assumed int16 PCM), it is converted to float32 by dividing
-            by ``32768.0``.
+            If a numpy float32 array, used directly. If bytes (assumed
+            int16 PCM), it is converted to float32 by dividing by 32768.0.
+        vocabulary : list[str] or None, optional
+            Domain-specific words/phrases passed to whisper.cpp as
+            ``initial_prompt`` to bias the decoder. If None or empty,
+            no prompt is used. Long lists are truncated at word
+            boundaries to stay within the whisper.cpp prompt budget.
 
         Returns
         -------
         str
-            Concatenation of all segment texts separated by a single
-            space.
+            Cleaned transcript text.
 
         Raises
         ------
@@ -111,11 +116,15 @@ class WhisperEngine:
         if self._model is None:
             raise RuntimeError("No model loaded")
 
-        # Convert raw int16 bytes to float32 numpy array.
         if isinstance(audio_data, (bytes, bytearray)):
             audio_data = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
 
-        segments = self._model.transcribe(audio_data)
+        kwargs = {}
+        prompt = build_whisper_prompt(vocabulary)
+        if prompt is not None:
+            kwargs["initial_prompt"] = prompt
+
+        segments = self._model.transcribe(audio_data, **kwargs)
         text = " ".join(seg.text for seg in segments)
         # Remove bracketed artifacts like [Silence], [Typing], etc.
         text = re.sub(r'\[.*?\]', '', text)
