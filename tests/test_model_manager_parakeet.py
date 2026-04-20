@@ -70,3 +70,49 @@ class TestDeleteModelDirectory:
     def test_removes_directory_recursively(self, manager_with_models):
         manager_with_models.delete_model("parakeet-tdt-0.6b-v3-int8")
         assert not manager_with_models.is_downloaded("parakeet-tdt-0.6b-v3-int8")
+
+
+class TestDownloadParakeet:
+    def test_dispatches_to_snapshot_download(self, tmp_path):
+        mm = ModelManager(str(tmp_path))
+        with patch("engine.model_manager.snapshot_download") as snap, \
+             patch("os.rename") as rename:
+            # snapshot_download writes to local_dir; emulate with a no-op.
+            snap.return_value = str(tmp_path / "parakeet-tdt-0.6b-v3-int8.partial")
+            mm.download_model("parakeet-tdt-0.6b-v3-int8")
+
+        snap.assert_called_once()
+        kwargs = snap.call_args.kwargs
+        assert kwargs["repo_id"] == "istupakov/parakeet-tdt-0.6b-v3-onnx"
+        assert kwargs["revision"] == "main"
+        assert kwargs["local_dir"].endswith("parakeet-tdt-0.6b-v3-int8.partial")
+        rename.assert_called_once()
+
+    def test_progress_callback_invoked_with_completion(self, tmp_path):
+        mm = ModelManager(str(tmp_path))
+        seen = []
+
+        def cb(percent, downloaded, total):
+            seen.append(percent)
+
+        with patch("engine.model_manager.snapshot_download"), \
+             patch("os.rename"):
+            mm.download_model("parakeet-tdt-0.6b-v3-int8", progress_callback=cb)
+
+        # We don't expose per-byte progress; just ensure 0 and 100 are reported.
+        assert seen[0] == 0
+        assert seen[-1] == 100
+
+    def test_cleans_up_partial_dir_on_failure(self, tmp_path):
+        mm = ModelManager(str(tmp_path))
+        partial = tmp_path / "parakeet-tdt-0.6b-v3-int8.partial"
+        partial.mkdir()  # simulate a partial that snapshot_download started
+
+        def boom(**_):
+            raise RuntimeError("network down")
+
+        with patch("engine.model_manager.snapshot_download", side_effect=boom):
+            with pytest.raises(RuntimeError, match="network down"):
+                mm.download_model("parakeet-tdt-0.6b-v3-int8")
+
+        assert not partial.exists()

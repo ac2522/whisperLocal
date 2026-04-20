@@ -5,6 +5,8 @@ import os
 import shutil
 import urllib.request
 
+from huggingface_hub import snapshot_download
+
 AVAILABLE_MODELS = [
     # ── Standard Whisper (ggerganov/whisper.cpp) ──────────────────────
     {"name": "ggml-base.bin", "type": "whisper", "size_mb": 142,
@@ -160,30 +162,28 @@ class ModelManager:
             shutil.rmtree(path)
 
     def download_model(self, model_name: str, progress_callback=None) -> str:
-        """Download *model_name* from HuggingFace into *models_dir*.
+        """Download ``model_name`` into ``models_dir``.
 
-        The file is first downloaded to a ``.partial`` file and then renamed
-        on success so that incomplete downloads are never mistaken for valid
-        models.
-
-        Parameters
-        ----------
-        model_name:
-            Filename of the model (e.g. ``ggml-base.bin``).
-        progress_callback:
-            Optional callable ``(percent, downloaded, total_size)`` invoked
-            during the download to report progress.
-
-        Returns
-        -------
-        str
-            Full path of the downloaded model file.
+        Whisper models stream a single ``.bin`` file from the URL in the
+        catalog. Parakeet models snapshot a HuggingFace repo into a
+        subdirectory. Both flows stage into ``<name>.partial`` and rename
+        atomically on success so incomplete downloads are never visible.
         """
         known = _MODELS_BY_NAME.get(model_name)
+        model_type = (known or {}).get("type", "whisper")
+
+        if model_type == "parakeet":
+            return self._download_parakeet(known, model_name, progress_callback)
+        return self._download_whisper(known, model_name, progress_callback)
+
+    def _download_whisper(self, known, model_name, progress_callback) -> str:
         if known and "url" in known:
             url = known["url"]
         else:
-            url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{model_name}"
+            url = (
+                "https://huggingface.co/ggerganov/whisper.cpp/"
+                f"resolve/main/{model_name}"
+            )
         dest_path = os.path.join(self.models_dir, model_name)
         partial_path = dest_path + ".partial"
 
@@ -191,19 +191,46 @@ class ModelManager:
             if progress_callback is None:
                 return
             downloaded = block_num * block_size
-            if total_size > 0:
-                percent = min(downloaded / total_size * 100, 100.0)
-            else:
-                percent = 0.0
+            percent = (
+                min(downloaded / total_size * 100, 100.0)
+                if total_size > 0
+                else 0.0
+            )
             progress_callback(percent, downloaded, total_size)
 
         try:
             urllib.request.urlretrieve(url, partial_path, reporthook=_reporthook)
             os.rename(partial_path, dest_path)
         except Exception:
-            # Clean up partial file on failure.
             if os.path.exists(partial_path):
                 os.remove(partial_path)
             raise
+        return dest_path
 
+    def _download_parakeet(self, known, model_name, progress_callback) -> str:
+        if not known or "hf_repo" not in known:
+            raise ValueError(
+                f"Parakeet model '{model_name}' has no hf_repo entry in the catalog"
+            )
+
+        dest_path = os.path.join(self.models_dir, model_name)
+        partial_path = dest_path + ".partial"
+
+        if progress_callback is not None:
+            progress_callback(0, 0, 0)
+
+        try:
+            snapshot_download(
+                repo_id=known["hf_repo"],
+                revision=known.get("hf_revision", "main"),
+                local_dir=partial_path,
+            )
+            os.rename(partial_path, dest_path)
+        except Exception:
+            if os.path.isdir(partial_path):
+                shutil.rmtree(partial_path, ignore_errors=True)
+            raise
+
+        if progress_callback is not None:
+            progress_callback(100, 0, 0)
         return dest_path
