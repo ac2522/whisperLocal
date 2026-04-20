@@ -63,8 +63,16 @@ class TestListAvailable:
         available = manager.list_available()
         for model in available:
             assert "name" in model
+            assert "type" in model
+            assert model["type"] in ("whisper", "parakeet")
             assert "size_mb" in model
             assert "description" in model
+
+    def test_list_available_includes_parakeet_entries(self, manager):
+        available = manager.list_available()
+        names = [m["name"] for m in available]
+        assert "parakeet-tdt-0.6b-v2-int8" in names
+        assert "parakeet-tdt-0.6b-v3-int8" in names
 
 
 class TestIsDownloaded:
