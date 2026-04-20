@@ -47,7 +47,7 @@ from config.paths import (
 )
 from config.settings import SettingsManager
 from engine.model_manager import ModelManager
-from engine.whisper_engine import WhisperEngine
+from engine.factory import make_engine
 from audio.recorder import Recorder
 from audio.device_manager import DeviceManager
 from ui.error_panel import ErrorPanel
@@ -223,7 +223,7 @@ class MainWindow(QWidget):
         if model_size:
             try:
                 model_path = self.model_manager.get_model_path(model_size)
-                return WhisperEngine(model_path)
+                return make_engine(model_path)
             except FileNotFoundError:
                 logger.warning("Saved model '%s' not found, trying fallback", model_size)
             except Exception:
@@ -237,7 +237,7 @@ class MainWindow(QWidget):
             self.settings.set('model_size', first['name'])
             self.settings.save()
             try:
-                return WhisperEngine(first['path'])
+                return make_engine(first['path'])
             except Exception:
                 logger.error("Failed to load fallback model '%s'", first['name'], exc_info=True)
 
@@ -649,12 +649,17 @@ class MainWindow(QWidget):
             return
 
         try:
-            if self.engine is not None and self.engine.is_loaded():
-                self.update_status_signal.emit("Reloading model...")
-                self.engine.reload(model_path)
-            else:
-                self.update_status_signal.emit("Loading model...")
-                self.engine = WhisperEngine(model_path)
+            # Always rebuild via the factory so cross-engine switches
+            # (Whisper <-> Parakeet) work correctly. Model load cost is
+            # incurred either way; calling reload() in-place would only save
+            # an object alloc.
+            already_loaded = self.engine is not None and self.engine.is_loaded()
+            self.update_status_signal.emit(
+                "Reloading model..." if already_loaded else "Loading model..."
+            )
+            if self.engine is not None:
+                self.engine.unload()
+            self.engine = make_engine(model_path)
             self.update_status_signal.emit("")
             logger.info("Engine reloaded with model '%s'", model_name)
         except Exception as e:
