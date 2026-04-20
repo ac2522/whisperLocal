@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
 )
 from PyQt5.QtGui import QFont, QTextCursor
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 
 
 class QtLogHandler(logging.Handler):
@@ -33,6 +33,9 @@ class ErrorPanel(QWidget):
     """
 
     MAX_ENTRIES = 50
+
+    # Signal to marshal log messages from any thread to the GUI thread
+    _log_signal = pyqtSignal(str, int)
 
     # Colour map: logging level -> HTML hex colour
     _LEVEL_COLOURS = {
@@ -80,6 +83,9 @@ class ErrorPanel(QWidget):
         layout.addWidget(self._text_edit)
         self.setLayout(layout)
 
+        # --- Connect log signal to the actual UI update ----------------------
+        self._log_signal.connect(self._append_log_on_main_thread)
+
         # --- Install logging handler ---------------------------------------
         self._install_log_handler()
 
@@ -107,13 +113,13 @@ class ErrorPanel(QWidget):
     def append_log(self, message: str, level: int) -> None:
         """Append a coloured log *message* to the text area.
 
-        Parameters
-        ----------
-        message:
-            Pre-formatted log string.
-        level:
-            The numeric logging level (e.g. ``logging.ERROR``).
+        This method is safe to call from any thread — it marshals the
+        actual widget update to the GUI thread via a signal.
         """
+        self._log_signal.emit(message, level)
+
+    def _append_log_on_main_thread(self, message: str, level: int) -> None:
+        """Slot: perform the actual QTextEdit update on the GUI thread."""
         colour = self._LEVEL_COLOURS.get(level, self._LEVEL_COLOURS[logging.INFO])
         html = f'<span style="color:{colour};">{message}</span>'
         self._text_edit.append(html)
