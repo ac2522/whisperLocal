@@ -7,6 +7,9 @@ import logging
 import os
 import urllib.request
 
+import numpy as np
+import onnxruntime
+
 logger = logging.getLogger(__name__)
 
 AGGRESSIVENESS_TO_THRESHOLD: dict[int, float] = {
@@ -62,3 +65,62 @@ def ensure_vad_model(dest_path: str) -> str:
 
     logger.info("Silero VAD model downloaded successfully")
     return dest_path
+
+
+class SileroVAD:
+    """Neural voice-activity detector wrapping Silero VAD v5.
+
+    Stateful: maintains LSTM hidden state across ``is_speech`` calls so
+    predictions benefit from temporal context. Call ``reset()`` at the
+    start of each recording session.
+    """
+
+    SAMPLE_RATE = 16000
+    CHUNK_SAMPLES = 512
+    _STATE_SHAPE = (2, 1, 128)
+
+    def __init__(self, model_path: str, providers: list[str] | None = None):
+        providers = providers or ["CPUExecutionProvider"]
+        self._session = onnxruntime.InferenceSession(model_path, providers=providers)
+        self._state: np.ndarray
+        self.reset()
+
+    @property
+    def sample_rate(self) -> int:
+        return self.SAMPLE_RATE
+
+    @property
+    def chunk_samples(self) -> int:
+        return self.CHUNK_SAMPLES
+
+    def reset(self) -> None:
+        """Clear the LSTM hidden state. Call at the start of a new recording."""
+        self._state = np.zeros(self._STATE_SHAPE, dtype=np.float32)
+
+    def is_speech(self, chunk_f32: np.ndarray, threshold: float) -> bool:
+        """Return True iff the model's speech probability meets ``threshold``.
+
+        ``chunk_f32`` must be a 1-D float32 array of exactly 512 samples at
+        16 kHz, normalised to [-1, 1].
+        """
+        if chunk_f32.ndim != 1:
+            raise ValueError(
+                f"chunk must be 1-D, got shape {chunk_f32.shape}"
+            )
+        if chunk_f32.shape[0] != self.CHUNK_SAMPLES:
+            raise ValueError(
+                f"chunk must have exactly 512 samples, got {chunk_f32.shape[0]}"
+            )
+        if chunk_f32.dtype != np.float32:
+            raise ValueError(
+                f"chunk must be float32, got {chunk_f32.dtype}"
+            )
+
+        feeds = {
+            "input": chunk_f32[np.newaxis, :],
+            "sr": np.array(self.SAMPLE_RATE, dtype=np.int64),
+            "state": self._state,
+        }
+        prob, new_state = self._session.run(None, feeds)
+        self._state = new_state
+        return float(prob[0, 0]) >= threshold

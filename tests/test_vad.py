@@ -91,3 +91,133 @@ class TestEnsureVADModel:
 
         assert not dest.exists()
         assert not partial.exists()
+
+import numpy as np
+from unittest.mock import MagicMock
+
+from audio.vad import SileroVAD
+
+
+@pytest.fixture
+def mock_onnx_session():
+    """Patch onnxruntime.InferenceSession with a MagicMock that
+    returns scripted probabilities + a state tensor."""
+    with patch("audio.vad.onnxruntime.InferenceSession") as cls:
+        session = MagicMock()
+        # Default: probability 0.8, state is just zeros
+        session.run.return_value = [
+            np.array([[0.8]], dtype=np.float32),
+            np.zeros((2, 1, 128), dtype=np.float32),
+        ]
+        cls.return_value = session
+        yield cls, session
+
+
+class TestSileroVADConstruction:
+    def test_loads_model(self, mock_onnx_session):
+        cls, _ = mock_onnx_session
+        SileroVAD("/tmp/silero_vad.onnx")
+        cls.assert_called_once()
+        args, kwargs = cls.call_args
+        assert args[0] == "/tmp/silero_vad.onnx"
+        assert kwargs["providers"] == ["CPUExecutionProvider"]
+
+    def test_custom_providers(self, mock_onnx_session):
+        cls, _ = mock_onnx_session
+        SileroVAD("/tmp/silero_vad.onnx", providers=["CUDAExecutionProvider"])
+        assert cls.call_args.kwargs["providers"] == ["CUDAExecutionProvider"]
+
+    def test_sample_rate_and_chunk_samples(self, mock_onnx_session):
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        assert vad.sample_rate == 16000
+        assert vad.chunk_samples == 512
+
+
+class TestSileroVADIsSpeech:
+    def test_accepts_correct_input_shape(self, mock_onnx_session):
+        _, session = mock_onnx_session
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        chunk = np.zeros(512, dtype=np.float32)
+        vad.is_speech(chunk, threshold=0.5)
+        feeds = session.run.call_args.args[1]
+        assert feeds["input"].shape == (1, 512)
+        assert feeds["input"].dtype == np.float32
+
+    def test_passes_sample_rate_as_int64(self, mock_onnx_session):
+        _, session = mock_onnx_session
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        vad.is_speech(np.zeros(512, dtype=np.float32), threshold=0.5)
+        sr = session.run.call_args.args[1]["sr"]
+        assert int(sr) == 16000
+        assert sr.dtype == np.int64
+
+    def test_threads_state_between_calls(self, mock_onnx_session):
+        _, session = mock_onnx_session
+        session.run.return_value = [
+            np.array([[0.8]], dtype=np.float32),
+            np.full((2, 1, 128), 0.42, dtype=np.float32),
+        ]
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+
+        # First call: state is zeros
+        vad.is_speech(np.zeros(512, dtype=np.float32), threshold=0.5)
+        first_state = session.run.call_args.args[1]["state"]
+        assert np.all(first_state == 0.0)
+
+        # Second call: state is the output from the first call
+        vad.is_speech(np.zeros(512, dtype=np.float32), threshold=0.5)
+        second_state = session.run.call_args.args[1]["state"]
+        assert np.allclose(second_state, 0.42)
+
+    def test_threshold_comparison_is_inclusive(self, mock_onnx_session):
+        _, session = mock_onnx_session
+        session.run.return_value = [
+            np.array([[0.5]], dtype=np.float32),
+            np.zeros((2, 1, 128), dtype=np.float32),
+        ]
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        assert vad.is_speech(np.zeros(512, dtype=np.float32), threshold=0.5) is True
+
+    def test_probability_below_threshold_returns_false(self, mock_onnx_session):
+        _, session = mock_onnx_session
+        session.run.return_value = [
+            np.array([[0.4]], dtype=np.float32),
+            np.zeros((2, 1, 128), dtype=np.float32),
+        ]
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        assert vad.is_speech(np.zeros(512, dtype=np.float32), threshold=0.5) is False
+
+
+class TestSileroVADInputValidation:
+    def test_wrong_sample_count_raises(self, mock_onnx_session):
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        with pytest.raises(ValueError, match="512"):
+            vad.is_speech(np.zeros(480, dtype=np.float32), threshold=0.5)
+
+    def test_wrong_dtype_raises(self, mock_onnx_session):
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        with pytest.raises(ValueError, match="float32"):
+            vad.is_speech(np.zeros(512, dtype=np.float64), threshold=0.5)
+
+    def test_non_1d_raises(self, mock_onnx_session):
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+        with pytest.raises(ValueError, match="1-D"):
+            vad.is_speech(np.zeros((1, 512), dtype=np.float32), threshold=0.5)
+
+
+class TestSileroVADReset:
+    def test_reset_zeros_state(self, mock_onnx_session):
+        _, session = mock_onnx_session
+        session.run.return_value = [
+            np.array([[0.8]], dtype=np.float32),
+            np.full((2, 1, 128), 0.42, dtype=np.float32),
+        ]
+        vad = SileroVAD("/tmp/silero_vad.onnx")
+
+        vad.is_speech(np.zeros(512, dtype=np.float32), threshold=0.5)
+        # state is now 0.42
+        vad.reset()
+        vad.is_speech(np.zeros(512, dtype=np.float32), threshold=0.5)
+        # After reset, first call should have used zero state
+        state = session.run.call_args_list[-1].args[1]["state"]
+        assert np.all(state == 0.0)
