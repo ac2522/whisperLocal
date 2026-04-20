@@ -3,6 +3,7 @@
 import atexit
 import gc
 import logging
+import re
 
 import numpy as np
 from pywhispercpp.model import Model
@@ -115,7 +116,14 @@ class WhisperEngine:
             audio_data = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
 
         segments = self._model.transcribe(audio_data)
-        return " ".join(seg.text for seg in segments)
+        text = " ".join(seg.text for seg in segments)
+        # Remove bracketed artifacts like [Silence], [Typing], etc.
+        text = re.sub(r'\[.*?\]', '', text)
+        # Strip trailing hallucinated phrases (common with large-v3-turbo)
+        text = re.sub(r'\s*\b[Tt]hank you\.?\s*$', '', text)
+        # Collapse extra whitespace left behind.
+        text = re.sub(r'  +', ' ', text).strip()
+        return text
 
     # ------------------------------------------------------------------
     # Context-manager support
