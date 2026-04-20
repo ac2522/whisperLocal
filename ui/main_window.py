@@ -668,9 +668,14 @@ class MainWindow(QWidget):
             self.update_status_signal.emit(
                 "Reloading model..." if already_loaded else "Loading model..."
             )
-            if self.engine is not None:
-                self.engine.unload()
-            self.engine = make_engine(model_path)
+            new_engine = make_engine(model_path)
+            old_engine = self.engine
+            self.engine = new_engine
+            if old_engine is not None:
+                try:
+                    old_engine.unload()
+                except Exception:
+                    logger.warning("Failed to unload previous engine", exc_info=True)
             self.update_status_signal.emit("")
             logger.info("Engine reloaded with model '%s'", model_name)
         except Exception as e:
