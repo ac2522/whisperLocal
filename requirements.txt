@@ -16,3 +16,10 @@ evdev>=1.6.0
 
 # Utilities
 pyperclip>=1.8.2
+
+# Parakeet ASR (NVIDIA TDT 0.6B v2/v3 via ONNX Runtime)
+# Install with GPU: pip install onnxruntime-gpu>=1.19 (bundles CUDA 12 DLLs)
+# Install with CPU only: replace onnxruntime-gpu with onnxruntime
+onnx-asr[hub]>=0.7.0
+onnxruntime-gpu>=1.19.0
+huggingface_hub>=0.24.0
