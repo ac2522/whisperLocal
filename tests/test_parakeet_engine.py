@@ -78,6 +78,16 @@ class TestTranscribe:
         assert called_arg.dtype == np.float32
         assert called_arg.shape == (1000,)
 
+    def test_transcribe_normalizes_int16_ndarray(self, mock_load_model):
+        _, fake = mock_load_model
+        engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
+        # Peak int16 value should normalize to ~1.0, not 32767.0
+        audio = np.full(1000, 16384, dtype=np.int16)
+        engine.transcribe(audio)
+        called_arg = fake.recognize.call_args.args[0]
+        assert called_arg.dtype == np.float32
+        assert abs(called_arg.max() - 0.5) < 0.001
+
     def test_transcribe_passes_sample_rate_16000(self, mock_load_model):
         _, fake = mock_load_model
         engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")

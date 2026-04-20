@@ -83,6 +83,8 @@ class ParakeetEngine:
             audio_data = (
                 np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             )
+        elif np.issubdtype(audio_data.dtype, np.integer):
+            audio_data = audio_data.astype(np.float32) / 32768.0
         elif audio_data.dtype != np.float32:
             audio_data = audio_data.astype(np.float32)
 
