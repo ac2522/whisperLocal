@@ -217,32 +217,15 @@ class TestRecorderSilenceMode:
         pa_instance.open.side_effect = OSError("[Errno -9993] Illegal combination")
 
         recorder = Recorder()
-        with pytest.raises(OSError):
-            recorder.record_silence_mode()
-
-        assert not recorder.is_recording
-        recorder.cleanup()
-
-    def test_stops_on_external_stop(self, mock_pyaudio):
-        _pa_instance, _stream = mock_pyaudio
-        recorder = Recorder()
-
-        def _stop_soon():
-            time.sleep(0.05)
-            recorder.stop()
-
-        stopper = threading.Thread(target=_stop_soon)
-        stopper.start()
-
-        with patch("audio.recorder.webrtcvad.Vad") as mock_vad_cls:
+        with patch("audio.recorder.ensure_vad_model"), \
+             patch("audio.recorder.SileroVAD") as mock_vad_cls:
             mock_vad = MagicMock()
-            mock_vad.is_speech.return_value = False
+            mock_vad.chunk_samples = 512
+            mock_vad.sample_rate = 16000
             mock_vad_cls.return_value = mock_vad
-            audio = recorder.record_silence_mode()
+            with pytest.raises(OSError):
+                recorder.record_silence_mode()
 
-        stopper.join()
-
-        assert isinstance(audio, np.ndarray)
         assert not recorder.is_recording
         recorder.cleanup()
 
@@ -287,3 +270,104 @@ class TestCleanup:
             recorder._recording = True
         recorder.cleanup()
         assert not recorder.is_recording
+
+
+class TestRecordSilenceModeSilero:
+    """Silero-based silence-mode recording."""
+
+    @pytest.fixture
+    def mock_pyaudio_stream(self):
+        """Fake PyAudio stream yielding a scripted sequence of chunks."""
+        with patch("audio.recorder.pyaudio.PyAudio") as pa_cls:
+            pa = MagicMock()
+            pa_cls.return_value = pa
+            # device validation + sample rate picks
+            pa.get_device_info_by_index.return_value = {
+                "index": 0, "name": "mock", "maxInputChannels": 1,
+                "defaultSampleRate": 16000.0,
+            }
+            pa.is_format_supported.return_value = True
+            stream = MagicMock()
+            pa.open.return_value = stream
+            yield pa, stream
+
+    def test_surfaces_download_failure(self, mock_pyaudio_stream):
+        from audio.recorder import Recorder
+        pa, stream = mock_pyaudio_stream
+        with patch("audio.recorder.ensure_vad_model",
+                   side_effect=RuntimeError("network down")):
+            rec = Recorder(device_index=0)
+            with pytest.raises(RuntimeError, match="network down"):
+                rec.record_silence_mode(vad_aggressiveness=1, break_length=1)
+
+    def test_resets_vad_before_use(self, mock_pyaudio_stream):
+        from audio.recorder import Recorder
+        pa, stream = mock_pyaudio_stream
+        # One 30ms chunk of silence then stop flag trips
+        stream.read.side_effect = [b"\x00" * 960] * 200
+
+        fake_vad = MagicMock()
+        fake_vad.is_speech.return_value = False  # never sees speech → loop body exits when stop set
+        fake_vad.sample_rate = 16000
+        fake_vad.chunk_samples = 512
+
+        with patch("audio.recorder.ensure_vad_model"), \
+             patch("audio.recorder.SileroVAD", return_value=fake_vad):
+            rec = Recorder(device_index=0)
+
+            # Stop after a few reads so the test terminates
+            call_count = [0]
+            original_is_speech = fake_vad.is_speech
+            def counting_is_speech(*a, **kw):
+                call_count[0] += 1
+                if call_count[0] >= 3:
+                    rec.stop()
+                return False
+            fake_vad.is_speech.side_effect = counting_is_speech
+
+            rec.record_silence_mode(vad_aggressiveness=1, break_length=1)
+            fake_vad.reset.assert_called_once()
+
+    def test_stops_after_break_length_of_silence_post_speech(self, mock_pyaudio_stream):
+        """Scripted: 1 s of speech then 2 s of silence with break_length=2."""
+        from audio.recorder import Recorder
+        pa, stream = mock_pyaudio_stream
+        # 30ms chunks at 16kHz = 480 int16 samples = 960 bytes
+        stream.read.return_value = b"\x00" * 960
+
+        fake_vad = MagicMock()
+        fake_vad.chunk_samples = 512
+        fake_vad.sample_rate = 16000
+
+        # Build a response sequence: first N calls return True (speech),
+        # then False forever (silence). Recorder should stop after
+        # break_length seconds of silence post-speech.
+        speech_responses = [True] * 30  # ~1s of speech
+        silence_responses = [False] * 1000  # plenty of silence
+        fake_vad.is_speech.side_effect = speech_responses + silence_responses
+
+        with patch("audio.recorder.ensure_vad_model"), \
+             patch("audio.recorder.SileroVAD", return_value=fake_vad):
+            rec = Recorder(device_index=0)
+            audio = rec.record_silence_mode(vad_aggressiveness=1, break_length=2)
+
+        # is_speech was called enough times to reach break_length silence
+        # after the speech block. At 512-sample chunks in 16kHz, break_length=2s
+        # = 2 * 16000 / 512 ≈ 62.5 silent calls. Plus 30 speech calls → ~93.
+        assert fake_vad.is_speech.call_count >= 90
+        assert fake_vad.is_speech.call_count < 200
+        # audio is float32 in [-1, 1] at 16 kHz
+        assert audio.dtype == np.float32
+        assert audio.max() <= 1.0
+        assert audio.min() >= -1.0
+
+    def test_stream_cleaned_up_on_vad_error(self, mock_pyaudio_stream):
+        from audio.recorder import Recorder
+        pa, stream = mock_pyaudio_stream
+        with patch("audio.recorder.ensure_vad_model",
+                   side_effect=RuntimeError("model download failed")):
+            rec = Recorder(device_index=0)
+            with pytest.raises(RuntimeError):
+                rec.record_silence_mode(vad_aggressiveness=1, break_length=1)
+        # Stream was never opened because ensure_vad_model failed first.
+        pa.open.assert_not_called()

@@ -3,11 +3,17 @@
 import logging
 import threading
 
+import os
+
 import numpy as np
 import pyaudio
-import webrtcvad
+
+from audio.vad import SileroVAD, aggressiveness_to_threshold, ensure_vad_model
 
 logger = logging.getLogger(__name__)
+
+# Location of the Silero VAD model on disk. Downloaded on first use.
+VAD_MODEL_PATH = os.path.expanduser("~/.whisper2text/vad/silero_vad.onnx")
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -159,36 +165,24 @@ class Recorder:
     def record_silence_mode(
         self, vad_aggressiveness: int = 1, break_length: int = 5
     ) -> np.ndarray:
-        """Record speech, stopping after *break_length* seconds of silence.
+        """Record speech, stopping after ``break_length`` seconds of silence.
 
-        The method waits for voice activity before it starts accumulating
-        audio, then continues until *break_length* consecutive seconds of
-        silence are detected.
-
-        Parameters
-        ----------
-        vad_aggressiveness : int
-            WebRTC VAD aggressiveness (0-3).  Higher = more aggressive
-            filtering of non-speech.
-        break_length : int
-            Seconds of silence after speech that trigger a stop.
-
-        Returns
-        -------
-        np.ndarray
-            Recorded audio as float32 samples normalised to [-1, 1] at 16 kHz.
+        Uses Silero VAD v5 (neural, ONNX) for speech detection. The 0-3
+        ``vad_aggressiveness`` maps to an internal probability threshold
+        (see audio.vad.AGGRESSIVENESS_TO_THRESHOLD).
         """
-        vad = webrtcvad.Vad(vad_aggressiveness)
+        # Ensure the VAD model is available BEFORE opening the PyAudio stream,
+        # so a download failure doesn't leave an orphan stream.
+        ensure_vad_model(VAD_MODEL_PATH)
+        vad = SileroVAD(VAD_MODEL_PATH)
+        vad.reset()
+        threshold = aggressiveness_to_threshold(vad_aggressiveness)
 
         with self._lock:
             self._recording = True
 
         hw_rate = self._hw_rate
         chunk = int(hw_rate * CHUNK_DURATION_MS / 1000)
-
-        # VAD needs 16 kHz audio; if recording at a different rate we
-        # resample each chunk before passing it to the VAD.
-        vad_chunk = int(WHISPER_RATE * CHUNK_DURATION_MS / 1000)
 
         stream_kwargs = {
             "format": FORMAT,
@@ -208,33 +202,37 @@ class Recorder:
             raise
 
         frames: list[bytes] = []
-
+        # Buffer of 16 kHz float32 samples fed into Silero VAD.
+        vad_buffer = np.empty(0, dtype=np.float32)
+        total_samples_16k = 0
+        last_speech_idx = 0
         speech_detected = False
-        silent_chunks = 0
-        chunks_per_second = 1000 // CHUNK_DURATION_MS
-        silence_threshold = break_length * chunks_per_second
+        silence_samples_threshold = break_length * WHISPER_RATE
 
         try:
             while self.is_recording:
                 data = stream.read(chunk, exception_on_overflow=False)
                 frames.append(data)
 
-                # Resample chunk to 16 kHz for VAD if needed
+                samples = np.frombuffer(data, dtype=np.int16)
                 if hw_rate != WHISPER_RATE:
-                    samples = np.frombuffer(data, dtype=np.int16)
-                    resampled = _resample(samples, hw_rate, WHISPER_RATE)
-                    vad_data = resampled.astype(np.int16).tobytes()
-                else:
-                    vad_data = data
+                    samples = _resample(samples, hw_rate, WHISPER_RATE)
+                chunk_f32 = samples.astype(np.float32) / 32768.0
+                vad_buffer = np.concatenate([vad_buffer, chunk_f32])
 
-                is_speech = vad.is_speech(vad_data, WHISPER_RATE)
+                while vad_buffer.shape[0] >= vad.chunk_samples:
+                    window = vad_buffer[: vad.chunk_samples]
+                    vad_buffer = vad_buffer[vad.chunk_samples :]
+                    total_samples_16k += vad.chunk_samples
 
-                if is_speech:
-                    speech_detected = True
-                    silent_chunks = 0
-                elif speech_detected:
-                    silent_chunks += 1
-                    if silent_chunks >= silence_threshold:
+                    if vad.is_speech(window, threshold):
+                        speech_detected = True
+                        last_speech_idx = total_samples_16k
+                    elif speech_detected and (
+                        total_samples_16k - last_speech_idx >= silence_samples_threshold
+                    ):
+                        with self._lock:
+                            self._recording = False
                         break
         finally:
             with self._lock:

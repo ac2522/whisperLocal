@@ -1,6 +1,5 @@
 # Audio processing
 pyaudio>=0.2.11
-webrtcvad>=2.0.10
 numpy>=1.24.0
 
 # Speech recognition (whisper.cpp)
