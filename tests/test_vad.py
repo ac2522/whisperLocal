@@ -75,6 +75,20 @@ class TestEnsureVADModel:
 
         assert dest.exists()
 
+    def test_bare_filename_does_not_crash_on_mkdir(self, tmp_path, monkeypatch):
+        """A dest_path with no directory component must not crash os.makedirs."""
+        monkeypatch.chdir(tmp_path)
+
+        def fake_retrieve(url, filename):
+            with open(filename, "wb") as f:
+                f.write(b"\x00")
+
+        with patch("audio.vad.urllib.request.urlretrieve", side_effect=fake_retrieve):
+            # Bare filename — os.path.dirname returns ""
+            result = ensure_vad_model("silero_vad.onnx")
+        assert result == "silero_vad.onnx"
+        assert (tmp_path / "silero_vad.onnx").exists()
+
     def test_cleans_up_partial_on_failure(self, tmp_path):
         dest = tmp_path / "silero_vad.onnx"
         partial = tmp_path / "silero_vad.onnx.partial"

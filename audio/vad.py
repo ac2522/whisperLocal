@@ -48,7 +48,9 @@ def ensure_vad_model(dest_path: str) -> str:
     if os.path.isfile(dest_path):
         return dest_path
 
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    parent = os.path.dirname(dest_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     partial = dest_path + ".partial"
 
     try:

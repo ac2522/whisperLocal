@@ -225,7 +225,17 @@ class Recorder:
                     vad_buffer = vad_buffer[vad.chunk_samples :]
                     total_samples_16k += vad.chunk_samples
 
-                    if vad.is_speech(window, threshold):
+                    try:
+                        is_speech = vad.is_speech(window, threshold)
+                    except Exception:
+                        logger.exception(
+                            "Silero VAD inference failed at sample %d "
+                            "(threshold=%s, window shape=%s)",
+                            total_samples_16k, threshold, window.shape,
+                        )
+                        raise
+
+                    if is_speech:
                         speech_detected = True
                         last_speech_idx = total_samples_16k
                     elif speech_detected and (
