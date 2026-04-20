@@ -63,6 +63,20 @@ class ParakeetEngine:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    def get_active_provider(self) -> str | None:
+        """Return the ONNX Runtime provider that the loaded session is using.
+
+        Returns None if no model is loaded, or if the underlying onnx-asr
+        adapter does not expose a get_providers() method.
+        """
+        if self._model is None:
+            return None
+        try:
+            providers = self._model.get_providers()
+        except AttributeError:
+            return None
+        return providers[0] if providers else None
+
     def unload(self) -> None:
         if self._model is not None:
             logger.info("Unloading Parakeet model")

@@ -141,3 +141,23 @@ class TestReload:
         engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
         # WhisperEngine takes language=; ParakeetEngine should accept and ignore.
         engine.reload("/tmp/parakeet-tdt-0.6b-v3-int8", language="en")
+
+
+class TestGetActiveProvider:
+    def test_returns_first_provider(self, mock_load_model):
+        _, fake = mock_load_model
+        fake.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
+        assert engine.get_active_provider() == "CUDAExecutionProvider"
+
+    def test_returns_none_when_unloaded(self, mock_load_model):
+        engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
+        engine.unload()
+        assert engine.get_active_provider() is None
+
+    def test_returns_none_when_adapter_lacks_get_providers(self, mock_load_model):
+        _, fake = mock_load_model
+        # Some onnx-asr versions don't expose get_providers
+        del fake.get_providers
+        engine = ParakeetEngine("/tmp/parakeet-tdt-0.6b-v3-int8")
+        assert engine.get_active_provider() is None

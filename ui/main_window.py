@@ -48,6 +48,7 @@ from config.paths import (
 from config.settings import SettingsManager
 from engine.model_manager import ModelManager
 from engine.factory import make_engine
+from engine.parakeet_engine import ParakeetEngine
 from audio.recorder import Recorder
 from audio.device_manager import DeviceManager
 from ui.error_panel import ErrorPanel
@@ -128,15 +129,6 @@ def _find_keyboard_devices():
         dev.close()
 
     return keyboards if keyboards else fallbacks
-
-
-def _onnx_cuda_available() -> bool:
-    """Return True if ONNX Runtime reports CUDAExecutionProvider available."""
-    try:
-        import onnxruntime
-        return "CUDAExecutionProvider" in onnxruntime.get_available_providers()
-    except Exception:
-        return False
 
 
 class MainWindow(QWidget):
@@ -325,8 +317,6 @@ class MainWindow(QWidget):
 
     def _detect_compute_backend(self):
         """Return a human-readable backend string, with fallback annotations."""
-        from engine.parakeet_engine import ParakeetEngine
-
         backend = self.settings.get("compute_backend", "cpu")
         engine_is_parakeet = isinstance(self.engine, ParakeetEngine)
 
@@ -336,8 +326,10 @@ class MainWindow(QWidget):
             return "Vulkan"
 
         if backend == "cuda":
-            if engine_is_parakeet and not _onnx_cuda_available():
-                return "CUDA (CPU fallback)"
+            if engine_is_parakeet:
+                active = self.engine.get_active_provider()
+                if active is not None and active != "CUDAExecutionProvider":
+                    return "CUDA (CPU fallback)"
             return "CUDA"
 
         return "CPU"
