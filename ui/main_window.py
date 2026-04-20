@@ -689,9 +689,12 @@ class MainWindow(QWidget):
         """Start a global hotkey listener using evdev (works on Wayland).
 
         Listens on ALL detected keyboard devices simultaneously so the hotkey
-        works regardless of which keyboard is used.
+        works regardless of which keyboard is used.  Periodically re-scans for
+        newly plugged-in keyboards so USB/Bluetooth devices are picked up
+        without restarting the app.
         """
         stop_event = self._hotkey_stop_event
+        RESCAN_INTERVAL = 5.0  # seconds between device re-scans
 
         hotkey_str = self.settings.get('hotkey', 'Ctrl+Alt+Shift+L')
         self._hotkey_modifiers, self._hotkey_char = self._parse_hotkey(hotkey_str)
@@ -701,15 +704,18 @@ class MainWindow(QWidget):
             logger.error("Unknown hotkey character: %s", self._hotkey_char)
             return
 
-        dev_paths = self._keyboard_dev_paths
+        # Fresh scan at listener start (picks up devices plugged in since boot)
+        dev_paths = _find_keyboard_devices()
         if not dev_paths:
             logger.error("No keyboard devices found for hotkey listener")
             return
 
         devices = []
+        open_paths = set()
         for path in dev_paths:
             try:
                 devices.append(evdev.InputDevice(path))
+                open_paths.add(path)
             except Exception as e:
                 logger.warning("Failed to open keyboard device %s: %s", path, e)
 
@@ -723,34 +729,59 @@ class MainWindow(QWidget):
                      dev_names, self._hotkey_modifiers, self._hotkey_char, target_keycode)
 
         active_mods = set()
+        last_rescan = time.monotonic()
 
         while not self.is_quitting and not stop_event.is_set():
             try:
+                # Periodically check for new keyboards (USB hot-plug)
+                now = time.monotonic()
+                if now - last_rescan >= RESCAN_INTERVAL:
+                    last_rescan = now
+                    for path in _find_keyboard_devices():
+                        if path not in open_paths:
+                            try:
+                                dev = evdev.InputDevice(path)
+                                devices.append(dev)
+                                open_paths.add(path)
+                                logger.info("Hot-plugged keyboard detected: %s (%s)", dev.path, dev.name)
+                            except Exception:
+                                pass
+
                 r, _, _ = select.select(devices, [], [], 0.5)
                 if stop_event.is_set():
                     break
                 if not r:
                     continue
                 for dev in r:
-                    for event in dev.read():
-                        if event.type != 1:  # EV_KEY
-                            continue
-                        code = event.code
-                        value = event.value  # 1=press, 0=release, 2=repeat
+                    try:
+                        for event in dev.read():
+                            if event.type != 1:  # EV_KEY
+                                continue
+                            code = event.code
+                            value = event.value  # 1=press, 0=release, 2=repeat
 
-                        # Track modifiers
-                        mod_name = _EVDEV_MODIFIERS.get(code)
-                        if mod_name:
-                            if value >= 1:
-                                active_mods.add(mod_name)
-                            else:
-                                active_mods.discard(mod_name)
-                            continue
+                            # Track modifiers
+                            mod_name = _EVDEV_MODIFIERS.get(code)
+                            if mod_name:
+                                if value >= 1:
+                                    active_mods.add(mod_name)
+                                else:
+                                    active_mods.discard(mod_name)
+                                continue
 
-                        # Check for hotkey on press (not repeat)
-                        if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
-                            logger.info("Hotkey triggered!")
-                            self.hotkey_signal.emit()
+                            # Check for hotkey on press (not repeat)
+                            if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
+                                logger.info("Hotkey triggered!")
+                                self.hotkey_signal.emit()
+                    except OSError:
+                        # Device was unplugged
+                        logger.info("Keyboard disconnected: %s", dev.path)
+                        open_paths.discard(dev.path)
+                        devices.remove(dev)
+                        try:
+                            dev.close()
+                        except Exception:
+                            pass
             except Exception as e:
                 if not self.is_quitting and not stop_event.is_set():
                     logger.error("Error in hotkey listener: %s", e, exc_info=True)
