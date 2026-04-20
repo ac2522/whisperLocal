@@ -130,6 +130,15 @@ def _find_keyboard_devices():
     return keyboards if keyboards else fallbacks
 
 
+def _onnx_cuda_available() -> bool:
+    """Return True if ONNX Runtime reports CUDAExecutionProvider available."""
+    try:
+        import onnxruntime
+        return "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+    except Exception:
+        return False
+
+
 class MainWindow(QWidget):
     """Main application window for Speech to Text.
 
@@ -315,12 +324,22 @@ class MainWindow(QWidget):
             os.environ.pop('CUDA_VISIBLE_DEVICES', None)
 
     def _detect_compute_backend(self):
-        """Detect the active compute backend."""
-        backend = self.settings.get('compute_backend', 'cpu')
-        if backend == 'vulkan':
+        """Return a human-readable backend string, with fallback annotations."""
+        from engine.parakeet_engine import ParakeetEngine
+
+        backend = self.settings.get("compute_backend", "cpu")
+        engine_is_parakeet = isinstance(self.engine, ParakeetEngine)
+
+        if backend == "vulkan":
+            if engine_is_parakeet:
+                return "Vulkan (Parakeet on CPU)"
             return "Vulkan"
-        elif backend == 'cuda':
+
+        if backend == "cuda":
+            if engine_is_parakeet and not _onnx_cuda_available():
+                return "CUDA (CPU fallback)"
             return "CUDA"
+
         return "CPU"
 
     def _update_status_label(self):
