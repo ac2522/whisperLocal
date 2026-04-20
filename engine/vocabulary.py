@@ -14,7 +14,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_WORD_RE = re.compile(r"[A-Za-z][A-Za-z']*")
+_WORD_RE = re.compile(r"[A-Za-z]+")
 
 
 def build_whisper_prompt(
@@ -83,6 +83,11 @@ def apply_post_substitution(
     vocab_by_lower = dict(zip(vocab_lower, cleaned))
 
     def _match_case(source: str, replacement: str) -> str:
+        # Preserve interior uppercase from the vocab entry (e.g. iPhone, MacDonald).
+        has_interior_upper = any(ch.isupper() for ch in replacement[1:])
+        if has_interior_upper:
+            # Keep vocab casing, but uppercase the whole thing if source shouted.
+            return replacement.upper() if source.isupper() else replacement
         if source.isupper():
             return replacement.upper()
         if source[0].isupper():

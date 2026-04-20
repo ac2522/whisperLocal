@@ -44,15 +44,11 @@ class TestApplyPostSubstitution:
         assert apply_post_substitution("hello world", None) == "hello world"
 
     def test_exact_case_insensitive_match_replaced(self):
-        # "avrillo" in text, "Avrillo" in vocab — substitution applied
-        # preserving target vocab's canonical casing where appropriate
-        result = apply_post_substitution("visit avrillo today", ["Avrillo"])
-        assert result == "visit avrillo today" or result == "visit Avrillo today"
-        # Either behaviour is acceptable for exact-case-preserved matches;
-        # the substitution logic normalises toward vocab casing.
-        # We assert the canonical replacement happens:
-        assert "Avrillo" in apply_post_substitution("Avrillo", ["Avrillo"]) \
-            or "Avrillo" == apply_post_substitution("Avrillo", ["Avrillo"])
+        # Lowercase source, title-case vocab with no interior uppercase:
+        # source case wins → stays lowercase.
+        assert apply_post_substitution("visit avrillo today", ["Avrillo"]) == "visit avrillo today"
+        # Exact vocab match passes through unchanged.
+        assert apply_post_substitution("Avrillo", ["Avrillo"]) == "Avrillo"
 
     def test_fuzzy_match_above_cutoff(self):
         # "Avrilo" (missing an 'l') should match "Avrillo"
@@ -103,3 +99,22 @@ class TestApplyPostSubstitution:
         # At default cutoff 0.85, "Evrelo" vs "Avrillo" is too far apart
         result = apply_post_substitution("visit Evrelo", ["Avrillo"])
         assert "Evrelo" in result  # unchanged
+
+    def test_interior_uppercase_preserved_for_lower_source(self):
+        # "iphone" in transcript, "iPhone" in vocab — brand casing wins.
+        assert apply_post_substitution("my iphone", ["iPhone"]) == "my iPhone"
+
+    def test_interior_uppercase_preserved_for_title_source(self):
+        # "Iphone" in transcript, "iPhone" in vocab — still brand casing.
+        assert apply_post_substitution("Iphone", ["iPhone"]) == "iPhone"
+
+    def test_interior_uppercase_promoted_to_upper_when_source_shouts(self):
+        # "IPHONE" in transcript → "IPHONE" (all caps wins).
+        assert apply_post_substitution("IPHONE", ["iPhone"]) == "IPHONE"
+
+    def test_possessive_apostrophe_tokens_substitute_word_part(self):
+        # Avrillo's should match Avrillo and leave the 's intact.
+        assert apply_post_substitution("Avrilo's office", ["Avrillo"]) == "Avrillo's office"
+
+    def test_mixed_case_brand_like_MacDonald(self):
+        assert apply_post_substitution("see macdonald tomorrow", ["MacDonald"]) == "see MacDonald tomorrow"
