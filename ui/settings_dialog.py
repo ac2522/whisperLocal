@@ -110,23 +110,28 @@ class SettingsDialog(QDialog):
     # UI construction helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _format_model_label(model: dict) -> str:
+        """Format '[Whisper] ggml-base.bin (142 MB)' or the Parakeet equivalent."""
+        engine_tag = "Parakeet" if model.get("type") == "parakeet" else "Whisper"
+        return f"[{engine_tag}] {model['name']} ({model['size_mb']} MB)"
+
     def _build_model_group(self):
         group = QGroupBox("Model")
         vbox = QVBoxLayout()
 
-        # Whisper Model dropdown (downloaded models)
-        vbox.addWidget(QLabel("Whisper Model"))
+        # Transcription Model dropdown (downloaded models, both engines)
+        vbox.addWidget(QLabel("Transcription Model"))
         self._model_combo = QComboBox()
         vbox.addWidget(self._model_combo)
         self._refresh_model_list()
 
-        # Download Model dropdown + Download button
+        # Download Model dropdown + Download button (both engines)
         vbox.addWidget(QLabel("Download Model"))
         dl_row = QHBoxLayout()
         self._download_combo = QComboBox()
         for m in self._model_manager.list_available():
-            label = f"{m['name']} ({m['size_mb']} MB)"
-            self._download_combo.addItem(label, m["name"])
+            self._download_combo.addItem(self._format_model_label(m), m["name"])
         dl_row.addWidget(self._download_combo)
 
         download_btn = QPushButton("Download")
@@ -266,14 +271,13 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _refresh_model_list(self):
-        """Repopulate the Whisper Model dropdown with downloaded models."""
+        """Repopulate the Transcription Model dropdown with downloaded models."""
         self._model_combo.clear()
         current_model = self._settings.get("model_size")
         select_idx = 0
 
         for i, m in enumerate(self._model_manager.list_downloaded()):
-            label = f"{m['name']} ({m['size_mb']} MB)"
-            self._model_combo.addItem(label, m["name"])
+            self._model_combo.addItem(self._format_model_label(m), m["name"])
             if m["name"] == current_model:
                 select_idx = i
 
