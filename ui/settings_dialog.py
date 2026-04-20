@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSpinBox,
+    QTextEdit,
     QVBoxLayout,
 )
 
@@ -100,6 +101,9 @@ class SettingsDialog(QDialog):
 
         # --- Hotkey group ---
         layout.addWidget(self._build_hotkey_group())
+
+        # --- Vocabulary group ---
+        layout.addWidget(self._build_vocabulary_group())
 
         # --- Save button ---
         save_btn = QPushButton("Save")
@@ -266,6 +270,27 @@ class SettingsDialog(QDialog):
         group.setLayout(vbox)
         return group
 
+    def _build_vocabulary_group(self):
+        group = QGroupBox("Custom Vocabulary")
+        vbox = QVBoxLayout()
+
+        vbox.addWidget(QLabel(
+            "One word or short phrase per line. Used to bias Whisper's decoder "
+            "(real prompt) and to fuzzy-fix Parakeet's output (post-processing)."
+        ))
+
+        self._vocab_edit = QTextEdit()
+        self._vocab_edit.setPlaceholderText(
+            "Avrillo\nconveyancing\nSDLT"
+        )
+        existing = self._settings.get("custom_vocabulary") or []
+        self._vocab_edit.setPlainText("\n".join(existing))
+        self._vocab_edit.setFixedHeight(120)
+        vbox.addWidget(self._vocab_edit)
+
+        group.setLayout(vbox)
+        return group
+
     # ------------------------------------------------------------------
     # Model helpers
     # ------------------------------------------------------------------
@@ -389,6 +414,11 @@ class SettingsDialog(QDialog):
 
         # Hotkey
         self._settings.set("hotkey", self._hotkey_display.text())
+
+        # Custom vocabulary — split on newlines, strip, drop empties
+        vocab_raw = self._vocab_edit.toPlainText().splitlines()
+        vocab_list = [line.strip() for line in vocab_raw if line.strip()]
+        self._settings.set("custom_vocabulary", vocab_list)
 
         self._settings.save()
         self.accept()

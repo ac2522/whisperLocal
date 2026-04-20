@@ -592,7 +592,8 @@ class MainWindow(QWidget):
         self.is_transcribing = True
         self.recording_stopped_signal.emit()  # Update button to "Transcribing..."
         try:
-            text = self.engine.transcribe(audio_data)
+            vocabulary = self.settings.get("custom_vocabulary") or None
+            text = self.engine.transcribe(audio_data, vocabulary=vocabulary)
             if text and text.strip():
                 self.transcript_signal.emit(text)
         except Exception as e:

@@ -19,6 +19,7 @@ DEFAULT_SETTINGS = {
     'recording_mode': 'silence',
     'break_length': 5,
     'auto_paste': False,
+    'custom_vocabulary': [],
     'transcripts': [],
     'audio_device_index': None,
     'audio_device_name': None,
