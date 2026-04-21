@@ -10,8 +10,13 @@ from engine.parakeet_engine import ParakeetEngine
 
 @pytest.fixture
 def mock_load_model():
-    """Patch onnx_asr.load_model so no real ONNX session is created."""
-    with patch("engine.parakeet_engine.onnx_asr.load_model") as m:
+    """Patch onnx_asr.load_model so no real ONNX session is created.
+
+    Patches at the source module because ``engine.parakeet_engine`` now
+    imports ``onnx_asr`` lazily inside ``_load`` (see that module's
+    docstring for why).
+    """
+    with patch("onnx_asr.load_model") as m:
         fake = MagicMock()
         fake.recognize.return_value = "hello world"
         m.return_value = fake

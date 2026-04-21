@@ -11,9 +11,16 @@ import os
 import re
 
 import numpy as np
-import onnx_asr
 
 from engine.vocabulary import apply_post_substitution
+
+# NOTE: ``onnx_asr`` (and transitively ``onnxruntime``) is deliberately
+# NOT imported at module level. Loading onnxruntime eagerly pulls in the
+# CUDA runtime libraries bundled with onnxruntime-gpu, which clobbers
+# state that pywhispercpp/ggml later needs for its own CUDA backend,
+# causing a hard abort inside ggml_cuda_init() at WhisperEngine load.
+# Import inside _load() so the heavy dependency is only touched when
+# the user actually constructs a Parakeet model.
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +60,10 @@ class ParakeetEngine:
         atexit.register(self.unload)
 
     def _load(self, model_path: str) -> None:
+        # Lazy import — see module docstring for why this must not happen
+        # at module top level.
+        import onnx_asr
+
         model_id = _infer_model_id(model_path)
         logger.info("Loading Parakeet model %s from %s", model_id, model_path)
         self._model = onnx_asr.load_model(
