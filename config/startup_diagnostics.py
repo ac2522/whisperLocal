@@ -4,17 +4,18 @@ Surfaces missing GPU libraries and optional packages so users can see in
 the logs what acceleration is (or isn't) available and what they can
 install to improve things. Never raises — all checks are best-effort.
 
-Importantly: this module must NOT import heavy CUDA-using packages like
-``onnxruntime`` at call time. Doing so pollutes the CUDA runtime state
-before ``pywhispercpp`` / ``ggml`` gets to initialise its own CUDA
-backend, causing a hard abort inside ``ggml_cuda_init()``. Every
-capability check here is done via ``importlib.util.find_spec`` or a
-``ctypes.CDLL`` probe so we never actually load the target module.
+Importantly: this module must NOT actually *load* any CUDA-adjacent
+shared library. Doing so pollutes the CUDA runtime state before
+``pywhispercpp`` / ``ggml`` gets to initialise its own CUDA backend,
+causing a hard abort inside ``ggml_cuda_init()``. Every capability
+check here is filesystem-only (``importlib.util.find_spec`` or
+``ldconfig -p`` parsing) — we never call ``dlopen`` / ``ctypes.CDLL``
+on anything with ``cuda``, ``cublas``, or ``cudnn`` in its name.
 """
 
-import ctypes
 import importlib.util
 import logging
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -75,19 +76,25 @@ def _onnxruntime_cuda_provider_present() -> bool:
 
 
 def _missing_cuda_deps() -> list[str]:
-    """Return names of CUDA runtime libs that ONNX Runtime's CUDA provider needs
-    but cannot currently be dlopened on this machine.
+    """Return names of CUDA runtime libs that ONNX Runtime's CUDA provider
+    needs but are not currently registered with the dynamic linker on this
+    machine, according to ``ldconfig -p``.
 
-    Keep the list focused on the libs that actually block Parakeet inference.
+    Filesystem-only check — we never dlopen any CUDA library here, because
+    loading the system libcublas pre-empts the bundled one that ggml is
+    about to use and hard-aborts the whole process. cuDNN is the one the
+    user normally has to install separately, so it's the most useful signal.
     """
-    wanted = ("libcudnn.so.9", "libcublas.so.12", "libcublasLt.so.12")
-    missing: list[str] = []
-    for libname in wanted:
-        try:
-            ctypes.CDLL(libname)
-        except OSError:
-            missing.append(libname)
-    return missing
+    wanted = ("libcudnn.so.9",)
+    try:
+        result = subprocess.run(
+            ["ldconfig", "-p"], capture_output=True, text=True, timeout=5,
+        )
+        registered = result.stdout
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return []  # can't tell — stay silent
+
+    return [libname for libname in wanted if libname not in registered]
 
 
 def _log_hf_xet() -> None:

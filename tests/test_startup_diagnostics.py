@@ -65,17 +65,34 @@ class TestLogStartupDiagnostics:
 
 
 class TestMissingCudaDeps:
-    def test_missing_fake_lib_is_reported(self):
-        with patch("ctypes.CDLL", side_effect=OSError("not found")):
+    def test_missing_lib_reported_when_absent_from_ldconfig(self):
+        # ldconfig output that doesn't mention libcudnn.so.9
+        fake = type("R", (), {"stdout": "libfoo.so.1 => /lib/libfoo.so.1\n"})()
+        with patch("subprocess.run", return_value=fake):
             missing = _missing_cuda_deps()
         assert "libcudnn.so.9" in missing
-        assert "libcublas.so.12" in missing
-        assert "libcublasLt.so.12" in missing
 
-    def test_returns_empty_when_all_loadable(self):
-        with patch("ctypes.CDLL"):
+    def test_returns_empty_when_present_in_ldconfig(self):
+        fake = type("R", (), {
+            "stdout": "\tlibcudnn.so.9 (libc6,x86-64) => /lib/libcudnn.so.9\n",
+        })()
+        with patch("subprocess.run", return_value=fake):
             missing = _missing_cuda_deps()
         assert missing == []
+
+    def test_does_not_dlopen_any_cuda_library(self):
+        # Critical: calling ctypes.CDLL on libcublas / libcudart / etc
+        # loads them into the process, which clobbers the CUDA runtime
+        # state that ggml later needs to initialise its own backend.
+        with patch("ctypes.CDLL") as cdll, \
+             patch("subprocess.run") as run:
+            run.return_value = type("R", (), {"stdout": ""})()
+            _missing_cuda_deps()
+        cdll.assert_not_called()
+
+    def test_returns_empty_if_ldconfig_missing(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError()):
+            assert _missing_cuda_deps() == []
 
 
 class TestOnnxruntimeCudaProviderPresent:
