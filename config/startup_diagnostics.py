@@ -3,9 +3,17 @@
 Surfaces missing GPU libraries and optional packages so users can see in
 the logs what acceleration is (or isn't) available and what they can
 install to improve things. Never raises — all checks are best-effort.
+
+Importantly: this module must NOT import heavy CUDA-using packages like
+``onnxruntime`` at call time. Doing so pollutes the CUDA runtime state
+before ``pywhispercpp`` / ``ggml`` gets to initialise its own CUDA
+backend, causing a hard abort inside ``ggml_cuda_init()``. Every
+capability check here is done via ``importlib.util.find_spec`` or a
+``ctypes.CDLL`` probe so we never actually load the target module.
 """
 
 import ctypes
+import importlib.util
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,31 +26,52 @@ def log_startup_diagnostics() -> None:
 
 
 def _log_onnxruntime_providers() -> None:
-    try:
-        import onnxruntime
-    except ImportError:
+    if importlib.util.find_spec("onnxruntime") is None:
         logger.warning(
             "onnxruntime not installed — Parakeet engine will be unavailable. "
             "Install with: pip install onnxruntime-gpu",
         )
         return
 
-    providers = onnxruntime.get_available_providers()
-    logger.info("ONNX Runtime providers available: %s", providers)
+    # Detect CUDA provider availability without importing onnxruntime.
+    # onnxruntime-gpu installs libonnxruntime_providers_cuda.so in its
+    # capi/ directory; the module's availability is a strong indicator.
+    cuda_provider_available = _onnxruntime_cuda_provider_present()
+    logger.info(
+        "onnxruntime installed (CUDA provider lib present: %s)",
+        cuda_provider_available,
+    )
 
-    if "CUDAExecutionProvider" in providers:
+    if cuda_provider_available:
         missing = _missing_cuda_deps()
         if missing:
             logger.warning(
-                "ONNX Runtime advertises CUDAExecutionProvider, but required "
-                "shared libraries are missing: %s. Parakeet CUDA inference "
-                "will fall back to CPU. On Ubuntu you can install cuDNN via "
+                "onnxruntime CUDA provider is installed but required shared "
+                "libraries are missing: %s. Parakeet CUDA inference will "
+                "fall back to CPU. On Ubuntu you can install cuDNN via "
                 "NVIDIA's CUDA apt repo — see "
                 "https://developer.nvidia.com/cudnn-downloads "
-                "(standard 'apt install libcudnn9-cuda-12' only works once the "
-                "NVIDIA CUDA repo is configured).",
+                "(standard 'apt install libcudnn9-cuda-12' only works once "
+                "the NVIDIA CUDA repo is configured).",
                 ", ".join(missing),
             )
+
+
+def _onnxruntime_cuda_provider_present() -> bool:
+    """True if onnxruntime's CUDA provider shared library is on disk.
+
+    This reads the file path, not the Python module, so it does not
+    trigger any CUDA runtime initialisation.
+    """
+    spec = importlib.util.find_spec("onnxruntime")
+    if spec is None or not spec.origin:
+        return False
+    import os
+    ort_dir = os.path.dirname(spec.origin)
+    # onnxruntime/__init__.py lives alongside the capi/ directory.
+    capi_dir = os.path.join(ort_dir, "capi")
+    lib = os.path.join(capi_dir, "libonnxruntime_providers_cuda.so")
+    return os.path.isfile(lib)
 
 
 def _missing_cuda_deps() -> list[str]:
@@ -62,9 +91,7 @@ def _missing_cuda_deps() -> list[str]:
 
 
 def _log_hf_xet() -> None:
-    try:
-        import hf_xet  # noqa: F401
-    except ImportError:
+    if importlib.util.find_spec("hf_xet") is None:
         logger.info(
             "hf_xet not installed — Parakeet model downloads will use regular "
             "HTTP. For faster downloads: pip install hf_xet",
