@@ -1,6 +1,14 @@
 """Silero VAD v5 integration: ONNX-based neural voice activity detection.
 
 Replaces the older webrtcvad DSP model in Recorder.record_silence_mode.
+
+NOTE: ``onnxruntime`` is deliberately NOT imported at module load time.
+Eagerly importing it pulls in the onnxruntime-gpu CUDA runtime
+libraries and clobbers state that pywhispercpp/ggml later needs for
+its own CUDA backend, causing a hard abort inside ``ggml_cuda_init()``
+whenever the user has a Whisper model loaded. The module-level SileroVAD
+class is still cheap to import; onnxruntime is only loaded when the
+class is instantiated (i.e. when silence-mode recording actually starts).
 """
 
 import logging
@@ -8,7 +16,6 @@ import os
 import urllib.request
 
 import numpy as np
-import onnxruntime
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +89,10 @@ class SileroVAD:
     _STATE_SHAPE = (2, 1, 128)
 
     def __init__(self, model_path: str, providers: list[str] | None = None):
+        # Lazy import — see module docstring for why this must not happen
+        # at module top level.
+        import onnxruntime
+
         providers = providers or ["CPUExecutionProvider"]
         self._session = onnxruntime.InferenceSession(model_path, providers=providers)
         self._state: np.ndarray

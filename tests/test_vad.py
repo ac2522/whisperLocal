@@ -116,7 +116,10 @@ from audio.vad import SileroVAD
 def mock_onnx_session():
     """Patch onnxruntime.InferenceSession with a MagicMock that
     returns scripted probabilities + a state tensor."""
-    with patch("audio.vad.onnxruntime.InferenceSession") as cls:
+    # Patched at the source module because audio.vad now imports
+    # onnxruntime lazily inside SileroVAD.__init__ (see that module's
+    # docstring for why).
+    with patch("onnxruntime.InferenceSession") as cls:
         session = MagicMock()
         # Default: probability 0.8, state is just zeros
         session.run.return_value = [
