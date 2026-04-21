@@ -60,6 +60,15 @@ hf_datas, hf_bins, hf_hiddens = collect_all('huggingface_hub')
 datas += hf_datas
 binaries += hf_bins
 
+# hf_xet (optional — accelerates HuggingFace Xet-backed downloads).
+# Non-fatal if absent; collect_all just returns empty tuples.
+try:
+    xet_datas, xet_bins, xet_hiddens = collect_all('hf_xet')
+    datas += xet_datas
+    binaries += xet_bins
+except Exception:
+    xet_hiddens = []
+
 # ── Hidden imports ──────────────────────────────────────────────────────
 hiddenimports = (
     pwcpp_hiddens
@@ -68,6 +77,7 @@ hiddenimports = (
     + ort_hiddens
     + onnxasr_hiddens
     + hf_hiddens
+    + xet_hiddens
     + collect_submodules('config')
     + collect_submodules('engine')
     + collect_submodules('audio')

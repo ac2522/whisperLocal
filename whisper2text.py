@@ -9,6 +9,7 @@ from pathlib import Path
 
 from config.logging_setup import setup_logging
 from config.process_lock import ProcessLock
+from config.startup_diagnostics import log_startup_diagnostics
 
 SETTINGS_DIR = os.path.join(Path.home(), '.whisper2text')
 LOCK_FILE = os.path.join(SETTINGS_DIR, 'app.lock')
@@ -16,6 +17,7 @@ LOCK_FILE = os.path.join(SETTINGS_DIR, 'app.lock')
 
 def main():
     setup_logging()
+    log_startup_diagnostics()
 
     lock = ProcessLock(LOCK_FILE)
     if not lock.acquire():

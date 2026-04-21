@@ -22,3 +22,5 @@ pyperclip>=1.8.2
 onnx-asr[hub]>=0.7.0
 onnxruntime-gpu>=1.19.0
 huggingface_hub>=0.24.0
+# Optional — enables Xet transfer for faster HuggingFace downloads
+hf_xet>=0.1.5

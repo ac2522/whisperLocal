@@ -19,8 +19,10 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 
@@ -85,27 +87,48 @@ class SettingsDialog(QDialog):
         self._download_thread = None
         self._progress_dialog = None
 
+        # Start smaller and let users resize — without tabs this dialog grew
+        # taller than many displays.
+        self.resize(520, 560)
+
         layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
 
-        # --- Model group ---
-        layout.addWidget(self._build_model_group())
+        # --- Tab 1: Model & Compute ---
+        tab_model = QWidget()
+        tab_model_layout = QVBoxLayout(tab_model)
+        tab_model_layout.addWidget(self._build_model_group())
+        tab_model_layout.addWidget(self._build_compute_group())
+        tab_model_layout.addStretch()
+        tabs.addTab(tab_model, "Model && Compute")
 
-        # --- Compute group ---
-        layout.addWidget(self._build_compute_group())
+        # --- Tab 2: Audio & Recording ---
+        tab_audio = QWidget()
+        tab_audio_layout = QVBoxLayout(tab_audio)
+        tab_audio_layout.addWidget(self._build_audio_group())
+        tab_audio_layout.addWidget(self._build_recording_group())
+        tab_audio_layout.addStretch()
+        tabs.addTab(tab_audio, "Audio && Recording")
 
-        # --- Audio group ---
-        layout.addWidget(self._build_audio_group())
+        # --- Tab 3: Vocabulary ---
+        tab_vocab = QWidget()
+        tab_vocab_layout = QVBoxLayout(tab_vocab)
+        tab_vocab_layout.addWidget(self._build_vocabulary_group())
+        tab_vocab_layout.addStretch()
+        tabs.addTab(tab_vocab, "Vocabulary")
 
-        # --- Recording group ---
-        layout.addWidget(self._build_recording_group())
+        # --- Tab 4: Hotkey ---
+        tab_hotkey = QWidget()
+        tab_hotkey_layout = QVBoxLayout(tab_hotkey)
+        tab_hotkey_layout.addWidget(self._build_hotkey_group())
+        tab_hotkey_layout.addStretch()
+        tabs.addTab(tab_hotkey, "Hotkey")
 
-        # --- Hotkey group ---
-        layout.addWidget(self._build_hotkey_group())
-
-        # --- Vocabulary group ---
-        layout.addWidget(self._build_vocabulary_group())
-
-        # --- Save button ---
+        # --- Save button (outside tabs — always visible) ---
+        # _save reads values from every widget on every tab regardless of
+        # which tab is currently visible, because the widgets are held on
+        # self._* and persist across tab switches.
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(self._save)
         layout.addWidget(save_btn)
