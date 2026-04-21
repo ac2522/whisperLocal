@@ -1,8 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for whisper2text.
 
-Collects pywhispercpp (with CUDA native libs), evdev, webrtcvad, pyaudio,
-and all project submodules. UPX is disabled because it corrupts .so files.
+Collects pywhispercpp (with CUDA native libs), evdev, pyaudio,
+onnxruntime (with CUDA execution provider libs), onnx_asr, and
+huggingface_hub, plus all project submodules. UPX is disabled
+because it corrupts .so files.
 """
 
 import os
@@ -38,22 +40,34 @@ evdev_datas, evdev_bins, evdev_hiddens = collect_all('evdev')
 datas += evdev_datas
 binaries += evdev_bins
 
-# webrtcvad native extension
-webrtcvad_datas, webrtcvad_bins, webrtcvad_hiddens = collect_all('webrtcvad')
-datas += webrtcvad_datas
-binaries += webrtcvad_bins
-
 # pyaudio native extension
 pyaudio_datas, pyaudio_bins, pyaudio_hiddens = collect_all('pyaudio')
 datas += pyaudio_datas
 binaries += pyaudio_bins
 
+# onnxruntime (with CUDAExecutionProvider libs + bundled CUDA 12 DLLs)
+ort_datas, ort_bins, ort_hiddens = collect_all('onnxruntime')
+datas += ort_datas
+binaries += ort_bins
+
+# onnx_asr (Parakeet wrapper) — pulls its ONNX schema + resources
+onnxasr_datas, onnxasr_bins, onnxasr_hiddens = collect_all('onnx_asr')
+datas += onnxasr_datas
+binaries += onnxasr_bins
+
+# huggingface_hub (used by ModelManager to snapshot Parakeet repos)
+hf_datas, hf_bins, hf_hiddens = collect_all('huggingface_hub')
+datas += hf_datas
+binaries += hf_bins
+
 # ── Hidden imports ──────────────────────────────────────────────────────
 hiddenimports = (
     pwcpp_hiddens
     + evdev_hiddens
-    + webrtcvad_hiddens
     + pyaudio_hiddens
+    + ort_hiddens
+    + onnxasr_hiddens
+    + hf_hiddens
     + collect_submodules('config')
     + collect_submodules('engine')
     + collect_submodules('audio')
