@@ -70,6 +70,15 @@ class DeviceManager:
                 pass
             self._pa = None
 
+    def refresh(self) -> None:
+        """Re-enumerate audio devices by restarting the PyAudio instance.
+
+        PyAudio caches its device list at init time, so a re-init is the
+        only reliable way to pick up devices plugged in after startup.
+        """
+        self.cleanup()
+        self._ensure_pa()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

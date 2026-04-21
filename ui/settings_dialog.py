@@ -156,8 +156,27 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout()
 
         vbox.addWidget(QLabel("Input Device"))
-        self._device_combo = QComboBox()
+        # QComboBox subclassed so that opening the dropdown re-queries
+        # the OS for newly-plugged-in audio devices. PyAudio caches its
+        # device list at init time, so we also ask the DeviceManager to
+        # restart PyAudio before re-enumerating.
+        dialog = self
 
+        class _RefreshingComboBox(QComboBox):
+            def showPopup(self_inner):  # noqa: N805 — Qt convention
+                dialog._refresh_device_list()
+                super().showPopup()
+
+        self._device_combo = _RefreshingComboBox()
+        self._populate_device_combo()
+        vbox.addWidget(self._device_combo)
+
+        group.setLayout(vbox)
+        return group
+
+    def _populate_device_combo(self) -> None:
+        """Fill the device combo from the current DeviceManager state."""
+        self._device_combo.clear()
         # "System Default" entry with data=None
         self._device_combo.addItem("System Default", None)
 
@@ -170,10 +189,11 @@ class SettingsDialog(QDialog):
                 select_idx = self._device_combo.count() - 1
 
         self._device_combo.setCurrentIndex(select_idx)
-        vbox.addWidget(self._device_combo)
 
-        group.setLayout(vbox)
-        return group
+    def _refresh_device_list(self) -> None:
+        """Restart PyAudio, then refill the combo. Called from showPopup."""
+        self._device_manager.refresh()
+        self._populate_device_combo()
 
     def _build_recording_group(self):
         group = QGroupBox("Recording")
@@ -228,17 +248,27 @@ class SettingsDialog(QDialog):
         self._compute_combo = QComboBox()
         self._compute_combo.addItem("CPU", "cpu")
 
-        # Detect available GPU backends from pywhispercpp shared libs
+        # Detect available GPU backends from pywhispercpp shared libs.
+        # Use explicit lib-name prefixes to avoid false positives
+        # (e.g. libicudata.so contains "cuda" as a substring).
+        backends_seen: set[str] = set()
+        _CUDA_LIB_PREFIXES = ("libcuda", "libcudart", "libcublas", "libggml-cuda")
+        _VULKAN_LIB_PREFIXES = ("libvulkan", "libggml-vulkan")
         try:
             import importlib.util, os
             spec = importlib.util.find_spec('_pywhispercpp')
             if spec and spec.origin:
                 lib_dir = os.path.dirname(spec.origin)
                 for f in os.listdir(lib_dir):
-                    if 'vulkan' in f.lower():
-                        self._compute_combo.addItem("Vulkan GPU", "vulkan")
-                    if 'cuda' in f.lower():
-                        self._compute_combo.addItem("CUDA GPU", "cuda")
+                    low = f.lower()
+                    if any(low.startswith(p) for p in _VULKAN_LIB_PREFIXES):
+                        if "vulkan" not in backends_seen:
+                            backends_seen.add("vulkan")
+                            self._compute_combo.addItem("Vulkan GPU", "vulkan")
+                    if any(low.startswith(p) for p in _CUDA_LIB_PREFIXES):
+                        if "cuda" not in backends_seen:
+                            backends_seen.add("cuda")
+                            self._compute_combo.addItem("CUDA GPU", "cuda")
         except Exception:
             pass
 
