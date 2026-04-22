@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── whisper2text installer ──────────────────────────────────────────────
-# Builds a PyInstaller binary locally (matching this machine's GPU drivers)
-# and installs it as a systemd user service with crash recovery.
+# ── whisperLocal installer ─────────────────────────────────────────────
+# Installs system dependencies, builds pywhispercpp with GPU support,
+# builds a PyInstaller binary, and sets up a systemd user service.
 # ────────────────────────────────────────────────────────────────────────
 
 INSTALL_DIR="$HOME/.local/share/whisperLocal"
@@ -25,39 +25,119 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-# ── Step 1: Check prerequisites ────────────────────────────────────────
-info "Checking prerequisites..."
+# ── Step 1: System dependencies ───────────────────────────────────────
+info "Checking system dependencies..."
+
+NEED_APT=()
 
 if ! command -v python3 &>/dev/null; then
     error "python3 not found. Install it first."
     exit 1
 fi
 
-if ! command -v ydotool &>/dev/null; then
-    warn "ydotool not found. Auto-paste feature will not work."
-    warn "Install with: sudo apt install ydotool"
+# PortAudio (required for PyAudio)
+if ! dpkg -s portaudio19-dev &>/dev/null 2>&1; then
+    NEED_APT+=(portaudio19-dev)
 fi
 
+# ydotool (auto-paste)
+if ! command -v ydotool &>/dev/null; then
+    NEED_APT+=(ydotool)
+fi
+
+if [ ${#NEED_APT[@]} -gt 0 ]; then
+    info "Installing: ${NEED_APT[*]}"
+    sudo apt-get install -y "${NEED_APT[@]}"
+fi
+
+# ── Step 2: CUDA toolkit ──────────────────────────────────────────────
+# Check if we have a GPU and whether nvcc is modern enough.
+GPU_BACKEND="cpu"
+
+if command -v nvidia-smi &>/dev/null; then
+    # Extract max CUDA version from driver (e.g. "13.0")
+    DRIVER_CUDA="$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' || true)"
+    DRIVER_MAJOR="${DRIVER_CUDA%%.*}"
+
+    NVCC_OK=false
+    if command -v nvcc &>/dev/null; then
+        NVCC_VER="$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9]+' || echo 0)"
+        if [ "$NVCC_VER" -ge 12 ]; then
+            NVCC_OK=true
+        fi
+    fi
+
+    if [ "$NVCC_OK" = false ] && [ -n "$DRIVER_CUDA" ]; then
+        warn "NVIDIA GPU detected (driver supports CUDA $DRIVER_CUDA)"
+        warn "but nvcc is missing or too old for GPU-accelerated builds."
+        echo ""
+        info "The CUDA toolkit can be installed from NVIDIA's repository."
+        # Determine package name: prefer matching driver major, fall back to 12-8
+        CUDA_PKG="cuda-toolkit-${DRIVER_MAJOR:-12}-0"
+        read -rp "Install $CUDA_PKG now? (requires sudo + ~3 GB download) [Y/n] " answer
+        if [[ ! "$answer" =~ ^[Nn]$ ]]; then
+            KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu$(lsb_release -rs | tr -d '.')/x86_64/cuda-keyring_1.1-1_all.deb"
+            KEYRING_TMP="$(mktemp)"
+            info "Downloading CUDA keyring..."
+            wget -q "$KEYRING_URL" -O "$KEYRING_TMP"
+            sudo dpkg -i "$KEYRING_TMP"
+            rm -f "$KEYRING_TMP"
+            sudo apt-get update
+            sudo apt-get install -y "$CUDA_PKG"
+            # Add to PATH for this session
+            CUDA_BIN="/usr/local/cuda/bin"
+            if [ -d "$CUDA_BIN" ]; then
+                export PATH="$CUDA_BIN:$PATH"
+            fi
+            NVCC_OK=true
+        fi
+    fi
+
+    if [ "$NVCC_OK" = true ]; then
+        GPU_BACKEND="cuda"
+    fi
+fi
+
+info "GPU backend: $GPU_BACKEND"
+
+# ── Step 3: Input group (for global hotkeys via evdev) ────────────────
 if ! groups | grep -qw input; then
     warn "Current user is not in the 'input' group."
-    warn "Global hotkeys (evdev) may not work."
-    warn "Fix with: sudo usermod -aG input \$USER  (then log out/in)"
+    warn "Global hotkeys will not work without it."
+    echo ""
+    read -rp "Add $USER to the 'input' group now? (requires sudo) [Y/n] " answer
+    if [[ ! "$answer" =~ ^[Nn]$ ]]; then
+        sudo usermod -aG input "$USER"
+        info "Added $USER to 'input' group. You must log out and back in for this to take effect."
+    else
+        warn "Skipped. Fix later with: sudo usermod -aG input \$USER  (then log out/in)"
+    fi
 fi
 
-# ── Step 2: Ensure PyInstaller is available ─────────────────────────────
-info "Checking for PyInstaller..."
+# ── Step 4: Python venv and dependencies ──────────────────────────────
+info "Setting up Python environment..."
 
-# Activate venv if present
-if [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
-    source "$SCRIPT_DIR/venv/bin/activate"
+if [ ! -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    python3 -m venv "$SCRIPT_DIR/venv"
+fi
+source "$SCRIPT_DIR/venv/bin/activate"
+
+# Install/rebuild pywhispercpp with GPU support
+if [ "$GPU_BACKEND" = "cuda" ]; then
+    info "Building pywhispercpp with CUDA support (this may take a few minutes)..."
+    GGML_CUDA=1 pip install pywhispercpp --no-binary pywhispercpp --no-cache-dir --force-reinstall
+else
+    info "Installing pywhispercpp (CPU only)..."
+    pip install pywhispercpp
 fi
 
-if ! python3 -m PyInstaller --version &>/dev/null; then
-    info "Installing PyInstaller..."
-    pip install pyinstaller
-fi
+# Install remaining dependencies
+pip install -r "$SCRIPT_DIR/requirements.txt"
 
-# ── Step 3: Build with PyInstaller ──────────────────────────────────────
+# Ensure PyInstaller and setuptools (for pkg_resources) are available
+pip install pyinstaller 'setuptools<70'
+
+# ── Step 5: Build with PyInstaller ────────────────────────────────────
 info "Building whisper2text binary..."
 cd "$SCRIPT_DIR"
 python3 -m PyInstaller whisper2text.spec --clean --noconfirm
@@ -69,7 +149,7 @@ fi
 
 info "Build successful."
 
-# ── Step 4: Install to ~/.local/share/whisperLocal/ ─────────────────────
+# ── Step 6: Install to ~/.local/share/whisperLocal/ ───────────────────
 info "Installing to $INSTALL_DIR ..."
 
 # Stop the service if it's already running
@@ -84,7 +164,7 @@ cp "$INSTALL_DIR/_internal/icon.png" "$INSTALL_DIR/whisper2text.png" 2>/dev/null
 
 info "Installed $(du -sh "$INSTALL_DIR" | cut -f1) to $INSTALL_DIR"
 
-# ── Step 5: Set up models directory ─────────────────────────────────────
+# ── Step 7: Set up models directory ───────────────────────────────────
 mkdir -p "$MODELS_DIR"
 
 # Check for models in the old location (project-local models/)
@@ -100,37 +180,46 @@ if [ -d "$SCRIPT_DIR/models" ] && ls "$SCRIPT_DIR/models/"*.bin &>/dev/null 2>&1
     fi
 fi
 
-# ── Step 6: Fix libcuda.so ──────────────────────────────────────────────
+# ── Step 8: Fix libcuda.so ────────────────────────────────────────────
 # The bundled libcuda.so may not match this machine's GPU driver.
 # Replace it with the system's driver-matched version.
-info "Checking libcuda.so compatibility..."
-
-SYSTEM_LIBCUDA="$(ldconfig -p 2>/dev/null | grep 'libcuda.so\.' | head -1 | awk '{print $NF}')"
-
-if [ -n "$SYSTEM_LIBCUDA" ]; then
-    # Find the bundled libcuda in pywhispercpp.libs
-    BUNDLED_LIBCUDA="$(find "$INSTALL_DIR/pywhispercpp.libs" -name 'libcuda*.so*' 2>/dev/null | head -1)"
-    if [ -n "$BUNDLED_LIBCUDA" ]; then
-        info "Replacing bundled libcuda with system version ($SYSTEM_LIBCUDA)..."
-        cp "$SYSTEM_LIBCUDA" "$BUNDLED_LIBCUDA"
+if [ "$GPU_BACKEND" = "cuda" ]; then
+    info "Checking libcuda.so compatibility..."
+    SYSTEM_LIBCUDA="$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\./ {print $NF; exit}')"
+    if [ -n "$SYSTEM_LIBCUDA" ]; then
+        BUNDLED_LIBCUDA="$(find "$INSTALL_DIR/pywhispercpp.libs" -name 'libcuda*.so*' 2>/dev/null | head -1)"
+        if [ -n "$BUNDLED_LIBCUDA" ]; then
+            info "Replacing bundled libcuda with system version..."
+            cp "$SYSTEM_LIBCUDA" "$BUNDLED_LIBCUDA"
+        fi
+    else
+        warn "System libcuda.so not found. CUDA may not work at runtime."
     fi
-else
-    warn "System libcuda.so not found via ldconfig. CUDA may not work."
-    warn "Ensure NVIDIA drivers are installed."
 fi
 
-# ── Step 7: Install .desktop file ───────────────────────────────────────
+# ── Step 9: Create whisperlocal command ───────────────────────────────
+info "Creating whisperlocal command..."
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/whisperlocal" << 'LAUNCHER'
+#!/bin/bash
+exec "$HOME/.local/share/whisperLocal/whisper2text" "$@"
+LAUNCHER
+chmod +x "$HOME/.local/bin/whisperlocal"
+
+if ! echo "$PATH" | tr ':' '\n' | grep -q "$HOME/.local/bin"; then
+    warn "\$HOME/.local/bin is not in your PATH."
+    warn "Add this to your ~/.bashrc or ~/.zshrc:"
+    warn '  export PATH="$HOME/.local/bin:$PATH"'
+fi
+
+# ── Step 10: Install .desktop file ────────────────────────────────────
 info "Installing desktop entry..."
 mkdir -p "$DESKTOP_DIR"
-
-# Expand %HOME% placeholders in the desktop file
 sed "s|%HOME%|$HOME|g" "$SCRIPT_DIR/packaging/whisper2text.desktop" \
     > "$DESKTOP_DIR/whisper2text.desktop"
-
-# Update desktop database if available
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 
-# ── Step 8: Install and enable systemd service ──────────────────────────
+# ── Step 11: Install and enable systemd service ──────────────────────
 info "Installing systemd user service..."
 mkdir -p "$SERVICE_DIR"
 cp "$SCRIPT_DIR/packaging/whisper2text.service" "$SERVICE_DIR/"
@@ -139,7 +228,7 @@ systemctl --user daemon-reload
 systemctl --user enable "$SERVICE_NAME"
 systemctl --user start "$SERVICE_NAME"
 
-# ── Done ────────────────────────────────────────────────────────────────
+# ── Done ──────────────────────────────────────────────────────────────
 echo ""
 echo "========================================"
 info "Installation complete!"
@@ -148,6 +237,7 @@ echo ""
 echo "  Install location:  $INSTALL_DIR"
 echo "  User data:         $DATA_DIR"
 echo "  Models:            $MODELS_DIR"
+echo "  GPU backend:       $GPU_BACKEND"
 echo ""
 echo "  Management commands:"
 echo "    systemctl --user status $SERVICE_NAME    # Check status"
@@ -157,3 +247,7 @@ echo "    journalctl --user -u $SERVICE_NAME -f    # View logs"
 echo ""
 echo "  Models can be downloaded via the app's Settings dialog."
 echo ""
+if ! groups | grep -qw input; then
+    echo -e "  ${YELLOW}NOTE: Log out and back in to activate the 'input' group for hotkeys.${NC}"
+    echo ""
+fi

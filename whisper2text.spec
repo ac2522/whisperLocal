@@ -82,7 +82,7 @@ hiddenimports = (
     + collect_submodules('engine')
     + collect_submodules('audio')
     + collect_submodules('ui')
-    + ['pyperclip']
+    + ['pyperclip', 'pkg_resources', 'setuptools']
 )
 
 # ── Analysis ────────────────────────────────────────────────────────────

@@ -19,7 +19,9 @@ class QtLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            self.panel.append_log(msg, record.levelno)
+            # Use signal to marshal to the GUI thread (direct calls from
+            # background threads cause SEGV in Qt).
+            self.panel._log_signal.emit(msg, record.levelno)
         except Exception:
             self.handleError(record)
 
@@ -31,6 +33,8 @@ class ErrorPanel(QWidget):
     ``logger.info()`` / ``logger.error()`` call from *any* module is
     automatically captured and displayed inside the panel's text area.
     """
+
+    _log_signal = pyqtSignal(str, int)
 
     MAX_ENTRIES = 50
 
@@ -84,6 +88,9 @@ class ErrorPanel(QWidget):
         self.setLayout(layout)
 
         # --- Connect log signal to the actual UI update ----------------------
+        # Resolved merge: keep the split between append_log (emits from any
+        # thread) and _append_log_on_main_thread (actual widget update on GUI
+        # thread). Connecting the signal to append_log would recurse.
         self._log_signal.connect(self._append_log_on_main_thread)
 
         # --- Install logging handler ---------------------------------------

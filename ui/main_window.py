@@ -6,6 +6,7 @@ sub-modules.
 """
 
 import atexit
+import importlib.util
 import logging
 import os
 import platform
@@ -36,7 +37,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
 
 import shutil
 
@@ -111,10 +112,20 @@ def _find_keyboard_devices():
     EV_REL = 2
     BTN_LEFT = 0x110
 
+    try:
+        all_devices = evdev.list_devices()
+    except Exception as e:
+        logger.warning("Cannot enumerate input devices: %s", e)
+        return []
+
     keyboards = []
     fallbacks = []
-    for path in evdev.list_devices():
-        dev = evdev.InputDevice(path)
+    for path in all_devices:
+        try:
+            dev = evdev.InputDevice(path)
+        except (PermissionError, OSError) as e:
+            logger.debug("Cannot open %s: %s", path, e)
+            continue
         caps = dev.capabilities()
 
         if EV_KEY not in caps or ec.KEY_A not in caps[EV_KEY]:
@@ -132,7 +143,7 @@ def _find_keyboard_devices():
 
 
 class MainWindow(QWidget):
-    """Main application window for Speech to Text.
+    """Main application window for whisperLocal.
 
     Integrates SettingsManager, ModelManager, DeviceManager, WhisperEngine,
     Recorder, ErrorPanel, and SettingsDialog into a single cohesive window.
@@ -148,11 +159,12 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Speech to Text")
+        self.setWindowTitle("whisperLocal")
         self.setWindowIcon(QIcon(ICON_NORMAL))
         self.resize(400, 600)
 
         self.is_quitting = False
+        self._quit_requested = False
         self.is_transcribing = False
         self._settings_dialog_open = False
         self._keyboard_dev_paths = _find_keyboard_devices()
@@ -161,6 +173,7 @@ class MainWindow(QWidget):
         self._hotkey_devices = []
         self._hotkey_stop_event = threading.Event()
         self._hotkey_thread = None
+        self.tray_icon = None
 
         # --- Core managers ---
         self.settings = SettingsManager()
@@ -171,7 +184,7 @@ class MainWindow(QWidget):
         self.engine = self._load_initial_engine()
 
         # --- Create Recorder with saved device ---
-        device_index = self.settings.get('audio_device_index')
+        device_index = self._resolve_audio_device()
         self.recorder = Recorder(device_index=device_index)
 
         # --- Load transcript history ---
@@ -200,6 +213,14 @@ class MainWindow(QWidget):
         signal.signal(signal.SIGTERM, self._signal_handler)
         sys.excepthook = self._handle_exception
 
+        # --- Signal-safe quit timer ---
+        # POSIX signal handlers cannot safely call Qt methods.
+        # _signal_handler sets _quit_requested; this timer picks it up.
+        self._signal_timer = QTimer(self)
+        self._signal_timer.setInterval(250)
+        self._signal_timer.timeout.connect(self._check_quit_requested)
+        self._signal_timer.start()
+
     # ------------------------------------------------------------------
     # Engine initialisation
     # ------------------------------------------------------------------
@@ -211,7 +232,6 @@ class MainWindow(QWidget):
         Falls back to any available model if the saved one is not found.
         Returns None if no models are available.
         """
-        self._apply_compute_backend()
         model_size = self.settings.get('model_size')
 
         # Handle old format: if model_size doesn't end in '.bin', convert it
@@ -224,7 +244,7 @@ class MainWindow(QWidget):
         if model_size:
             try:
                 model_path = self.model_manager.get_model_path(model_size)
-                return make_engine(model_path)
+                return self._create_engine(model_path)
             except FileNotFoundError:
                 logger.warning("Saved model '%s' not found, trying fallback", model_size)
             except Exception:
@@ -238,7 +258,7 @@ class MainWindow(QWidget):
             self.settings.set('model_size', first['name'])
             self.settings.save()
             try:
-                return make_engine(first['path'])
+                return self._create_engine(first['path'])
             except Exception:
                 logger.error("Failed to load fallback model '%s'", first['name'], exc_info=True)
 
@@ -307,17 +327,142 @@ class MainWindow(QWidget):
         self.error_panel = ErrorPanel(self)
         main_layout.addWidget(self.error_panel)
 
+    def _resolve_compute_backend(self, backend: str | None = None) -> str:
+        """Resolve requested backend into an available backend on this machine."""
+        requested = (backend or self.settings.get('compute_backend', 'auto') or 'auto').lower()
+        available = {'cpu'}
+        try:
+            spec = importlib.util.find_spec('_pywhispercpp')
+            if spec and spec.origin:
+                lib_dir = os.path.dirname(spec.origin)
+                for name in os.listdir(lib_dir):
+                    low = name.lower()
+                    if 'cuda' in low:
+                        available.add('cuda')
+                    if 'vulkan' in low:
+                        available.add('vulkan')
+        except Exception:
+            pass
+
+        if requested == 'auto':
+            if 'cuda' in available and shutil.which('nvidia-smi'):
+                return 'cuda'
+            if 'vulkan' in available:
+                return 'vulkan'
+            return 'cpu'
+
+        if requested == 'cuda' and not shutil.which('nvidia-smi'):
+            return 'cpu'
+        if requested not in available:
+            return 'cpu'
+        return requested
+
     def _apply_compute_backend(self):
         """Set environment variables to control GPU usage based on settings."""
-        backend = self.settings.get('compute_backend', 'cpu')
-        if backend == 'cpu':
+        resolved = self._resolve_compute_backend()
+        self._active_compute_backend = resolved
+
+        if resolved == 'cpu':
             os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            os.environ['GGML_VK_DISABLE'] = '1'
+        elif resolved == 'vulkan':
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            os.environ.pop('GGML_VK_DISABLE', None)
         else:
             os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+            os.environ.pop('GGML_VK_DISABLE', None)
+
+    def _create_engine(self, model_path: str):
+        """Create an engine via make_engine (Whisper or Parakeet by path),
+        retrying on CPU if the requested GPU backend fails to initialise.
+
+        The CPU retry is primarily useful for whisper.cpp on systems where
+        CUDA/Vulkan is advertised but a runtime-lib mismatch (driver/cuDNN)
+        would otherwise abort inside ggml. Parakeet has its own internal
+        CPU fallback via onnxruntime's provider list.
+        """
+        requested = (self.settings.get('compute_backend', 'auto') or 'auto').lower()
+        self._apply_compute_backend()
+        try:
+            return make_engine(model_path)
+        except Exception:
+            if getattr(self, '_active_compute_backend', 'cpu') == 'cpu':
+                raise
+            logger.warning(
+                "Engine failed on backend '%s', retrying on CPU",
+                getattr(self, '_active_compute_backend', 'unknown'),
+                exc_info=True,
+            )
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            os.environ['GGML_VK_DISABLE'] = '1'
+            self._active_compute_backend = 'cpu'
+            if requested != 'auto':
+                self.settings.set('compute_backend', 'cpu')
+                self.settings.save()
+            return make_engine(model_path)
+
+    def _resolve_audio_device(self):
+        """Resolve saved audio device, recovering by name if index is stale.
+
+        PyAudio device indices are not stable across reboots or USB
+        hotplug.  If the saved index now points to a different device
+        (e.g. a Scarlett index became a Thunderbolt index), search by
+        the saved name and update settings.  Returns None to use the
+        system default.
+        """
+        saved_index = self.settings.get('audio_device_index')
+        saved_name = self.settings.get('audio_device_name')
+
+        if saved_index is None:
+            return None
+
+        devices = self.device_manager.list_input_devices()
+        by_index = {d['index']: d for d in devices}
+
+        # If the saved index still exists and matches the saved name, use it
+        if saved_index in by_index:
+            current = by_index[saved_index]
+            if not saved_name or current['name'] == saved_name:
+                return saved_index
+            logger.warning(
+                "Saved audio device index %s now points to '%s' (was '%s')",
+                saved_index, current['name'], saved_name,
+            )
+
+        # Try to find the device by its saved name
+        if saved_name:
+            for d in devices:
+                if d['name'] == saved_name:
+                    logger.info(
+                        "Audio device '%s' moved from index %s to %s",
+                        saved_name, saved_index, d['index'],
+                    )
+                    self.settings.set('audio_device_index', d['index'])
+                    self.settings.save()
+                    return d['index']
+
+        # Device is gone — fall back to system default
+        logger.warning(
+            "Saved audio device '%s' (index %s) not found. "
+            "Falling back to System Default.",
+            saved_name or '?', saved_index,
+        )
+        self.settings.set('audio_device_index', None)
+        self.settings.set('audio_device_name', None)
+        self.settings.save()
+        return None
 
     def _detect_compute_backend(self):
-        """Return a human-readable backend string, with fallback annotations."""
-        backend = self.settings.get("compute_backend", "cpu")
+        """Return a human-readable backend string, with fallback annotations.
+
+        Prefers ``_active_compute_backend`` (set by ``_create_engine`` after
+        any GPU → CPU fallback) over the user's saved setting, so the label
+        reflects what actually ended up running rather than what was asked.
+        """
+        backend = getattr(self, '_active_compute_backend', None)
+        if backend is None:
+            backend = self.settings.get("compute_backend", "cpu")
+
         engine_is_parakeet = isinstance(self.engine, ParakeetEngine)
 
         if backend == "vulkan":
@@ -440,6 +585,13 @@ class MainWindow(QWidget):
 
     def _setup_tray(self):
         """Set up the system tray icon and its context menu."""
+        self.record_action = QAction("Start Recording", self)
+        self.record_action.triggered.connect(self._toggle_recording)
+
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray is not available in this session")
+            return
+
         self.tray_icon = QSystemTrayIcon(self)
 
         if os.path.exists(ICON_TRAY_NORMAL):
@@ -447,7 +599,7 @@ class MainWindow(QWidget):
         else:
             self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
 
-        self.tray_icon.setToolTip("Speech to Text")
+        self.tray_icon.setToolTip("whisperLocal")
 
         # Menu
         self.tray_menu = QMenu()
@@ -457,9 +609,6 @@ class MainWindow(QWidget):
 
         self.hide_action = QAction("Hide", self)
         self.hide_action.triggered.connect(self.hide)
-
-        self.record_action = QAction("Start Recording", self)
-        self.record_action.triggered.connect(self._toggle_recording)
 
         self.settings_action = QAction("Settings", self)
         self.settings_action.triggered.connect(self._open_settings)
@@ -500,8 +649,16 @@ class MainWindow(QWidget):
             window_path = ICON_NORMAL
             fallback = self.style().standardIcon(QStyle.SP_MediaPlay)
 
-        self.tray_icon.setIcon(QIcon(tray_path) if os.path.exists(tray_path) else fallback)
-        self.setWindowIcon(QIcon(window_path) if os.path.exists(window_path) else fallback)
+        if self.tray_icon is not None:
+            self.tray_icon.setIcon(QIcon(tray_path) if os.path.exists(tray_path) else fallback)
+
+        icon = QIcon(window_path) if os.path.exists(window_path) else fallback
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
+        self.setWindowIcon(icon)
+        if self.windowHandle() is not None:
+            self.windowHandle().setIcon(icon)
 
         # Overwrite the dash icon file so GNOME picks up the change
         try:
@@ -514,10 +671,12 @@ class MainWindow(QWidget):
         """Update the tray record action text and tooltip."""
         if self.recorder.is_recording:
             self.record_action.setText("Stop Recording")
-            self.tray_icon.setToolTip("Speech to Text (Recording...)")
+            if self.tray_icon is not None:
+                self.tray_icon.setToolTip("whisperLocal (Recording...)")
         else:
             self.record_action.setText("Start Recording")
-            self.tray_icon.setToolTip("Speech to Text")
+            if self.tray_icon is not None:
+                self.tray_icon.setToolTip("whisperLocal")
 
     # ------------------------------------------------------------------
     # Recording
@@ -547,18 +706,12 @@ class MainWindow(QWidget):
         self.record_button.setText('Stop Recording')
         self.record_button.setEnabled(True)  # Keep enabled so user can click to stop
         self.record_action.setText("Stop Recording")
-        self.tray_icon.setToolTip("Speech to Text (Recording...)")
+        if self.tray_icon is not None:
+            self.tray_icon.setToolTip("whisperLocal (Recording...)")
         # Set red icons immediately (before recording thread starts)
-        if os.path.exists(ICON_TRAY_RECORDING):
+        if self.tray_icon is not None and os.path.exists(ICON_TRAY_RECORDING):
             self.tray_icon.setIcon(QIcon(ICON_TRAY_RECORDING))
-        self.setWindowIcon(QIcon(ICON_RECORDING) if os.path.exists(ICON_RECORDING)
-                           else self.style().standardIcon(QStyle.SP_MediaStop))
-        # Overwrite dash icon to red
-        try:
-            if os.path.exists(ICON_RECORDING) and os.path.exists(ICON_DASH):
-                shutil.copy2(ICON_RECORDING, ICON_DASH)
-        except Exception:
-            pass
+        self._update_tray_icon()
 
         if recording_mode == 'button':
             threading.Thread(target=self._record_button, daemon=True).start()
@@ -635,7 +788,6 @@ class MainWindow(QWidget):
 
             # Reload engine if model or compute backend changed
             if new_model != old_model or new_backend != old_backend:
-                self._apply_compute_backend()
                 threading.Thread(target=self._reload_engine, daemon=True).start()
 
             # Recreate recorder if device changed
@@ -663,13 +815,15 @@ class MainWindow(QWidget):
         try:
             # Always rebuild via the factory so cross-engine switches
             # (Whisper <-> Parakeet) work correctly. Model load cost is
-            # incurred either way; calling reload() in-place would only save
-            # an object alloc.
+            # incurred either way; calling reload() in-place would only
+            # save an object alloc. Build the new engine first, then swap,
+            # then unload the old — so if _create_engine raises we still
+            # have the previous working engine.
             already_loaded = self.engine is not None and self.engine.is_loaded()
             self.update_status_signal.emit(
                 "Reloading model..." if already_loaded else "Loading model..."
             )
-            new_engine = make_engine(model_path)
+            new_engine = self._create_engine(model_path)
             old_engine = self.engine
             self.engine = new_engine
             if old_engine is not None:
@@ -711,12 +865,11 @@ class MainWindow(QWidget):
         """Start a global hotkey listener using evdev (works on Wayland).
 
         Listens on ALL detected keyboard devices simultaneously so the hotkey
-        works regardless of which keyboard is used.  Periodically re-scans for
-        newly plugged-in keyboards so USB/Bluetooth devices are picked up
-        without restarting the app.
+        works regardless of which keyboard is used.  Survives hotplug:
+        devices that disappear are dropped, and new keyboards are picked
+        up automatically on periodic rescan.
         """
         stop_event = self._hotkey_stop_event
-        RESCAN_INTERVAL = 5.0  # seconds between device re-scans
 
         hotkey_str = self.settings.get('hotkey', 'Ctrl+Alt+Shift+L')
         self._hotkey_modifiers, self._hotkey_char = self._parse_hotkey(hotkey_str)
@@ -726,94 +879,113 @@ class MainWindow(QWidget):
             logger.error("Unknown hotkey character: %s", self._hotkey_char)
             return
 
-        # Fresh scan at listener start (picks up devices plugged in since boot)
-        dev_paths = _find_keyboard_devices()
-        if not dev_paths:
-            logger.error("No keyboard devices found for hotkey listener")
-            return
+        logger.info(
+            "Hotkey listener starting, target=%s+%s (keycode=%d)",
+            self._hotkey_modifiers, self._hotkey_char, target_keycode,
+        )
 
-        devices = []
-        open_paths = set()
-        for path in dev_paths:
-            try:
-                devices.append(evdev.InputDevice(path))
-                open_paths.add(path)
-            except Exception as e:
-                logger.warning("Failed to open keyboard device %s: %s", path, e)
+        # path -> InputDevice
+        devices: dict[str, evdev.InputDevice] = {}
+        active_mods: set[str] = set()
+        last_rescan = 0.0
+        rescan_interval = 2.0  # seconds between rescans
 
-        if not devices:
-            logger.error("Could not open any keyboard device")
-            return
-
-        self._hotkey_devices = devices
-        dev_names = ", ".join(f"{d.path} ({d.name})" for d in devices)
-        logger.info("Hotkey listener starting on [%s], target=%s+%s (keycode=%d)",
-                     dev_names, self._hotkey_modifiers, self._hotkey_char, target_keycode)
-
-        active_mods = set()
-        last_rescan = time.monotonic()
+        def rescan():
+            """Open any new keyboards and drop ones that vanished."""
+            current_paths = set(_find_keyboard_devices())
+            # Drop devices that are gone
+            for path in list(devices.keys()):
+                if path not in current_paths:
+                    try:
+                        devices[path].close()
+                    except Exception:
+                        pass
+                    del devices[path]
+                    logger.info("Hotkey: keyboard disconnected: %s", path)
+            # Add new devices
+            for path in current_paths:
+                if path in devices:
+                    continue
+                try:
+                    dev = evdev.InputDevice(path)
+                except Exception as e:
+                    logger.debug("Cannot open %s: %s", path, e)
+                    continue
+                devices[path] = dev
+                logger.info("Hotkey: keyboard connected: %s (%s)", path, dev.name)
+            self._hotkey_devices = list(devices.values())
+            self._keyboard_dev_paths = list(devices.keys())
 
         while not self.is_quitting and not stop_event.is_set():
-            try:
-                # Periodically check for new keyboards (USB hot-plug)
-                now = time.monotonic()
-                if now - last_rescan >= RESCAN_INTERVAL:
-                    last_rescan = now
-                    for path in _find_keyboard_devices():
-                        if path not in open_paths:
-                            try:
-                                dev = evdev.InputDevice(path)
-                                devices.append(dev)
-                                open_paths.add(path)
-                                logger.info("Hot-plugged keyboard detected: %s (%s)", dev.path, dev.name)
-                            except Exception:
-                                pass
+            now = time.time()
+            if now - last_rescan >= rescan_interval:
+                rescan()
+                last_rescan = now
 
-                r, _, _ = select.select(devices, [], [], 0.5)
-                if stop_event.is_set():
+            if not devices:
+                # Nothing to listen to — wait, then rescan
+                if stop_event.wait(timeout=rescan_interval):
                     break
-                if not r:
-                    continue
-                for dev in r:
-                    try:
-                        for event in dev.read():
-                            if event.type != 1:  # EV_KEY
-                                continue
-                            code = event.code
-                            value = event.value  # 1=press, 0=release, 2=repeat
+                continue
 
-                            # Track modifiers
-                            mod_name = _EVDEV_MODIFIERS.get(code)
-                            if mod_name:
-                                if value >= 1:
-                                    active_mods.add(mod_name)
-                                else:
-                                    active_mods.discard(mod_name)
-                                continue
-
-                            # Check for hotkey on press (not repeat)
-                            if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
-                                logger.info("Hotkey triggered!")
-                                self.hotkey_signal.emit()
-                    except OSError:
-                        # Device was unplugged
-                        logger.info("Keyboard disconnected: %s", dev.path)
-                        open_paths.discard(dev.path)
-                        devices.remove(dev)
-                        try:
-                            dev.close()
-                        except Exception:
-                            pass
+            try:
+                r, _, _ = select.select(list(devices.values()), [], [], 0.5)
             except Exception as e:
-                if not self.is_quitting and not stop_event.is_set():
-                    logger.error("Error in hotkey listener: %s", e, exc_info=True)
-                break
+                logger.warning("Hotkey select error: %s", e)
+                # Force rescan on next iteration
+                last_rescan = 0.0
+                continue
 
-        for dev in devices:
+            if stop_event.is_set():
+                break
+            if not r:
+                continue
+
+            for dev in r:
+                try:
+                    events = list(dev.read())
+                except OSError as e:
+                    # Device disappeared (errno 19 = ENODEV) or similar
+                    logger.info("Hotkey: device %s removed (%s)", dev.path, e)
+                    try:
+                        dev.close()
+                    except Exception:
+                        pass
+                    devices.pop(dev.path, None)
+                    # Rescan promptly so a reconnect is picked up fast
+                    last_rescan = 0.0
+                    continue
+                except Exception as e:
+                    logger.warning("Hotkey: read error on %s: %s", dev.path, e)
+                    continue
+
+                for event in events:
+                    if event.type != 1:  # EV_KEY
+                        continue
+                    code = event.code
+                    value = event.value  # 1=press, 0=release, 2=repeat
+
+                    # Track modifiers
+                    mod_name = _EVDEV_MODIFIERS.get(code)
+                    if mod_name:
+                        if value >= 1:
+                            active_mods.add(mod_name)
+                        else:
+                            active_mods.discard(mod_name)
+                        continue
+
+                    # Check for hotkey on press (not repeat)
+                    if value == 1 and code == target_keycode and active_mods == self._hotkey_modifiers:
+                        logger.info("Hotkey triggered!")
+                        self.hotkey_signal.emit()
+
+        for dev in devices.values():
             try:
                 dev.close()
             except Exception:
                 pass
+        devices.clear()
+        self._hotkey_devices = []
         logger.info("Hotkey listener stopped")
 
     def _reload_hotkey(self):
@@ -843,6 +1015,12 @@ class MainWindow(QWidget):
         text length.  ydotool injects keystrokes at the kernel level via
         /dev/uinput, which works on both Wayland and X11.
         """
+        if not shutil.which('ydotool'):
+            logger.warning(
+                "Auto-paste requires ydotool but it is not installed. "
+                "Install with: sudo apt install ydotool"
+            )
+            return
         try:
             time.sleep(0.05)
             subprocess.run(
@@ -901,7 +1079,8 @@ class MainWindow(QWidget):
         """Gracefully shut down the application."""
         self.is_quitting = True
         self._hotkey_stop_event.set()
-        self.tray_icon.hide()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         self._cleanup()
         if self._hotkey_thread and self._hotkey_thread.is_alive():
             self._hotkey_thread.join(timeout=2)
@@ -912,14 +1091,23 @@ class MainWindow(QWidget):
         """Handle the window close event."""
         self.is_quitting = True
         self._hotkey_stop_event.set()
-        self.tray_icon.hide()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         self._cleanup()
         if self._hotkey_thread and self._hotkey_thread.is_alive():
             self._hotkey_thread.join(timeout=2)
         event.accept()
 
+    def _check_quit_requested(self):
+        """Called by QTimer — safely invokes _quit on the main thread."""
+        if self._quit_requested:
+            self._quit_requested = False
+            self._quit()
+
     def _signal_handler(self, signum, frame):
-        """Handle SIGINT/SIGTERM by triggering quit."""
-        self._quit()
+        """Handle SIGINT/SIGTERM by scheduling a quit on the Qt event loop.
 
-
+        Calling Qt methods directly from a POSIX signal handler is unsafe
+        and causes SEGV.  Instead, set a flag and let a QTimer pick it up.
+        """
+        self._quit_requested = True

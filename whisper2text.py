@@ -4,7 +4,6 @@ import os
 os.environ['ALSA_DEBUG'] = '0'
 
 import sys
-import signal
 from pathlib import Path
 
 from config.logging_setup import setup_logging
@@ -36,7 +35,6 @@ def main():
         window = MainWindow()
         window.show()
 
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
         sys.exit(app.exec_())
     finally:
         lock.release()
