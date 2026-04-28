@@ -24,3 +24,6 @@ onnxruntime-gpu>=1.19.0
 huggingface_hub>=0.24.0
 # Optional — enables Xet transfer for faster HuggingFace downloads
 hf_xet>=0.1.5
+
+# Cloud transcription (Deepgram) — API key storage in OS keyring
+keyring>=25.0
