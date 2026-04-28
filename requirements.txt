@@ -27,3 +27,6 @@ hf_xet>=0.1.5
 
 # Cloud transcription (Deepgram) — API key storage in OS keyring
 keyring>=25.0
+
+# Cloud transcription (Deepgram Nova-3 via Listen v1 REST API)
+deepgram-sdk>=5.0
