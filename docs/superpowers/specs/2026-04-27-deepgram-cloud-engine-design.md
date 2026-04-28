@@ -1,8 +1,20 @@
 # Deepgram Cloud Transcription Engine — Design
 
 **Date:** 2026-04-27
-**Status:** Approved (brainstorming complete; awaiting spec review before implementation plan)
+**Status:** Implemented 2026-04-28 (commits f604b93..a487061; awaiting Task 8 manual smoke test)
 **Owner:** ac2522
+
+> **Implementation note (added 2026-04-28):** §3's `transcribe()` outline shows
+> `sample_rate` and `channels` as direct top-level kwargs to
+> `client.listen.v1.media.transcribe_file(...)`. This was correct against the
+> v5 SDK research the spec was based on, but `deepgram-sdk` v7 (the version
+> that resolved against `>=5.0`) made `transcribe_file` keyword-only with no
+> `**kwargs`, dropping those two parameters. The shipped engine routes them
+> through `request_options={"additional_query_parameters": {"sample_rate":
+> 16000, "channels": 1}}` instead, which surfaces them as the same query
+> string on the wire. See commit b4a31a2 and the
+> `TestSignatureCompatibility` tests for the regression guard. Behaviour is
+> unchanged from the user's perspective.
 
 ## 1. Goal & scope
 
