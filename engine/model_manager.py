@@ -66,6 +66,11 @@ AVAILABLE_MODELS = [
      "hf_repo": "istupakov/parakeet-tdt-0.6b-v3-onnx",
      "hf_revision": "main",
      "description": "Parakeet TDT v3 INT8 (~670MB) — multilingual (25 EU langs), fast on GPU"},
+
+    # ── Cloud (Deepgram) ─────────────────────────────────────────────
+    {"name": "deepgram-nova-3", "type": "cloud", "size_mb": 0,
+     "cloud_uri": "cloud://deepgram-nova-3",
+     "description": "Deepgram Nova-3 (Cloud) — requires API key, ~$0.46/hr"},
 ]
 
 # Build a lookup dict for quick access by model name.
@@ -86,9 +91,10 @@ class ModelManager:
     def list_downloaded(self) -> list[dict]:
         """Return a list of dicts for every downloaded model.
 
-        Recognizes two on-disk shapes:
+        Recognizes three on-disk shapes:
           * Whisper: any single ``.bin`` file in ``models_dir``.
           * Parakeet: any subdirectory containing ``encoder-model*.onnx``.
+          * Cloud: synthetic catalog entries (always "downloaded").
 
         Each dict has keys: name, path, size_mb, description, type.
         """
@@ -122,6 +128,17 @@ class ModelManager:
                 "description": description,
                 "type": model_type,
             })
+
+        # Append cloud entries — always available regardless of disk state.
+        for m in AVAILABLE_MODELS:
+            if m.get("type") == "cloud":
+                results.append({
+                    "name": m["name"],
+                    "path": m["cloud_uri"],
+                    "size_mb": 0,
+                    "description": m["description"],
+                    "type": "cloud",
+                })
         return results
 
     @staticmethod
@@ -133,15 +150,22 @@ class ModelManager:
         return [dict(m) for m in AVAILABLE_MODELS]
 
     def is_downloaded(self, model_name: str) -> bool:
-        """Return True if ``model_name`` exists as a file or directory."""
+        """Return True if ``model_name`` exists on disk or is a cloud entry."""
+        known = _MODELS_BY_NAME.get(model_name)
+        if known and known.get("type") == "cloud":
+            return True
         path = os.path.join(self.models_dir, model_name)
         return os.path.isfile(path) or os.path.isdir(path)
 
     def get_model_path(self, model_name: str) -> str:
-        """Return the full path for ``model_name`` (file or directory).
+        """Return the full path or cloud URI for ``model_name``.
 
-        Raises ``FileNotFoundError`` if the model has not been downloaded.
+        Raises ``FileNotFoundError`` if a local model has not been downloaded.
+        Cloud entries always resolve to their ``cloud_uri``.
         """
+        known = _MODELS_BY_NAME.get(model_name)
+        if known and known.get("type") == "cloud":
+            return known["cloud_uri"]
         path = os.path.join(self.models_dir, model_name)
         if not (os.path.isfile(path) or os.path.isdir(path)):
             raise FileNotFoundError(
@@ -154,7 +178,13 @@ class ModelManager:
     # ------------------------------------------------------------------
 
     def delete_model(self, model_name: str) -> None:
-        """Delete the model file or directory from ``models_dir``."""
+        """Delete the model file or directory from ``models_dir``.
+
+        No-op for cloud entries (nothing to delete on disk).
+        """
+        known = _MODELS_BY_NAME.get(model_name)
+        if known and known.get("type") == "cloud":
+            return
         path = os.path.join(self.models_dir, model_name)
         if os.path.isfile(path):
             os.remove(path)
@@ -168,8 +198,14 @@ class ModelManager:
         catalog. Parakeet models snapshot a HuggingFace repo into a
         subdirectory. Both flows stage into ``<name>.partial`` and rename
         atomically on success so incomplete downloads are never visible.
+
+        Cloud entries raise ``ValueError`` — they are not downloadable.
         """
         known = _MODELS_BY_NAME.get(model_name)
+        if known and known.get("type") == "cloud":
+            raise ValueError(
+                f"Cloud model '{model_name}' does not need to be downloaded"
+            )
         model_type = (known or {}).get("type", "whisper")
 
         if model_type == "parakeet":

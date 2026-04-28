@@ -37,8 +37,12 @@ class TestListDownloaded:
         downloaded = manager.list_downloaded()
         for model in downloaded:
             assert "size_mb" in model
-            assert isinstance(model["size_mb"], float)
-            assert model["size_mb"] > 0
+            # Cloud entries have size 0 (int); on-disk models have float MB > 0.
+            if model.get("type") == "cloud":
+                assert model["size_mb"] == 0
+            else:
+                assert isinstance(model["size_mb"], float)
+                assert model["size_mb"] > 0
 
     def test_list_downloaded_has_required_keys(self, manager):
         downloaded = manager.list_downloaded()
@@ -64,7 +68,7 @@ class TestListAvailable:
         for model in available:
             assert "name" in model
             assert "type" in model
-            assert model["type"] in ("whisper", "parakeet")
+            assert model["type"] in ("whisper", "parakeet", "cloud")
             assert "size_mb" in model
             assert "description" in model
 
