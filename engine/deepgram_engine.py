@@ -83,21 +83,54 @@ class DeepgramEngine:
     def transcribe(self, audio_data, *, vocabulary: list[str] | None = None) -> str:
         """Send audio to Deepgram and return the cleaned transcript.
 
-        Errors from the SDK (auth, network, rate limit) propagate to the
-        caller. MainWindow routes them to the error panel.
+        Parameters
+        ----------
+        audio_data : numpy.ndarray or bytes
+            Float32 numpy array in [-1, 1], int16 numpy array, or raw
+            int16 PCM bytes. Coerced to little-endian int16 PCM at
+            ``SAMPLE_RATE`` mono before being sent.
+        vocabulary : list[str] or None, optional
+            Domain-specific words/phrases sent to Deepgram via the
+            ``keyterm`` parameter to bias the recogniser. If None or
+            empty, no keyterms are sent.
+
+        Returns
+        -------
+        str
+            Cleaned transcript text (whitespace stripped).
+
+        Raises
+        ------
+        RuntimeError
+            If the client is not initialised, or if the response shape
+            from Deepgram is missing the expected ``results.channels[0]
+            .alternatives[0].transcript`` path.
+        Exception
+            Any SDK-level error (auth failure, network error, rate
+            limit, etc.) propagates unchanged to the caller; MainWindow
+            routes these to the error panel.
         """
         if self._client is None:
             raise RuntimeError("Deepgram client not initialised")
 
         pcm = _to_int16_pcm_bytes(audio_data)
 
+        # deepgram-sdk v7 does NOT accept sample_rate / channels as
+        # top-level kwargs on transcribe_file. The Listen REST API still
+        # needs them as query-string params for raw linear16 PCM (which
+        # has no header), so we route them through request_options'
+        # additional_query_parameters escape hatch.
         kwargs = {
             "model": self._model,
             "smart_format": True,
             "language": self._language,
             "encoding": "linear16",
-            "sample_rate": self.SAMPLE_RATE,
-            "channels": 1,
+            "request_options": {
+                "additional_query_parameters": {
+                    "sample_rate": self.SAMPLE_RATE,
+                    "channels": 1,
+                },
+            },
         }
         if vocabulary:
             kwargs["keyterm"] = list(vocabulary)

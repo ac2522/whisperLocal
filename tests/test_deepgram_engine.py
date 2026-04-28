@@ -77,8 +77,25 @@ class TestTranscribe:
         assert kwargs["language"] == "en"
         assert kwargs["smart_format"] is True
         assert kwargs["encoding"] == "linear16"
-        assert kwargs["sample_rate"] == 16000
-        assert kwargs["channels"] == 1
+
+    def test_passes_sample_rate_and_channels_via_query_params(
+        self, fake_sdk, with_key
+    ):
+        # deepgram-sdk v7 rejects sample_rate / channels as top-level
+        # kwargs; they have to be smuggled through request_options'
+        # additional_query_parameters because the REST endpoint still
+        # needs them for header-less linear16 PCM.
+        from engine.deepgram_engine import DeepgramEngine
+        _, client = fake_sdk
+        eng = DeepgramEngine()
+        audio = np.zeros(16000, dtype=np.float32)
+        eng.transcribe(audio)
+        kwargs = client.listen.v1.media.transcribe_file.call_args.kwargs
+        assert "sample_rate" not in kwargs
+        assert "channels" not in kwargs
+        ro = kwargs["request_options"]
+        assert ro["additional_query_parameters"]["sample_rate"] == 16000
+        assert ro["additional_query_parameters"]["channels"] == 1
 
     def test_passes_keyterm_when_vocabulary_supplied(self, fake_sdk, with_key):
         from engine.deepgram_engine import DeepgramEngine
@@ -154,3 +171,63 @@ class TestLifecycle:
         eng.reload()
         assert cls.call_count == 2
         assert eng.is_loaded() is True
+
+
+class TestSignatureCompatibility:
+    """Catch SDK drift — these tests use the REAL deepgram package.
+
+    The other tests inject a MagicMock for ``deepgram``, so they accept
+    any kwargs the engine throws at them. This class deliberately
+    bypasses the mock and inspects the *real* SDK signature so a future
+    SDK upgrade that drops/renames a parameter fails loudly here
+    instead of in production.
+    """
+
+    def test_transcribe_file_accepts_engine_kwargs(self):
+        import inspect
+        from deepgram import DeepgramClient
+
+        # DeepgramClient(api_key=...) constructs without contacting the
+        # API — the key is only used when a request is made.
+        client = DeepgramClient(api_key="test-key")
+        method = client.listen.v1.media.transcribe_file
+        sig = inspect.signature(method)
+        accepted = set(sig.parameters.keys())
+        has_var_keyword = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        )
+
+        # Every kwarg DeepgramEngine.transcribe passes at call time.
+        # NB: sample_rate / channels are deliberately absent — they
+        # ride along inside request_options.additional_query_parameters
+        # because the v7 SDK does not expose them as top-level kwargs.
+        required_kwargs = {
+            "request",
+            "model",
+            "smart_format",
+            "language",
+            "encoding",
+            "keyterm",
+            "request_options",
+        }
+        missing = required_kwargs - accepted
+        if missing and not has_var_keyword:
+            pytest.fail(
+                f"deepgram SDK does not accept: {missing}. "
+                "Engine kwargs need updating."
+            )
+
+    def test_request_options_accepts_additional_query_parameters(self):
+        # The engine relies on request_options being a TypedDict with
+        # an ``additional_query_parameters`` field. If that contract
+        # ever changes, sample_rate / channels stop being delivered
+        # and Deepgram silently mis-decodes the audio.
+        from deepgram.core.request_options import RequestOptions
+
+        annotations = getattr(RequestOptions, "__annotations__", {})
+        assert "additional_query_parameters" in annotations, (
+            "deepgram.core.request_options.RequestOptions no longer "
+            "exposes 'additional_query_parameters'. The engine's "
+            "sample_rate/channels routing needs updating."
+        )
