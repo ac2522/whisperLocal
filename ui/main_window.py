@@ -50,6 +50,7 @@ from config.settings import SettingsManager
 from engine.model_manager import ModelManager
 from engine.factory import make_engine
 from engine.parakeet_engine import ParakeetEngine
+from engine.deepgram_engine import DeepgramEngine
 from audio.recorder import Recorder
 from audio.device_manager import DeviceManager
 from ui.error_panel import ErrorPanel
@@ -373,14 +374,12 @@ class MainWindow(QWidget):
             os.environ.pop('GGML_VK_DISABLE', None)
 
     def _create_engine(self, model_path: str):
-        """Create an engine via make_engine (Whisper or Parakeet by path),
-        retrying on CPU if the requested GPU backend fails to initialise.
+        """Create an engine via make_engine, retrying on CPU if a GPU backend
+        fails. Cloud engines have no compute backend and bypass the retry."""
+        if model_path.startswith("cloud://"):
+            self._active_compute_backend = "cloud"
+            return make_engine(model_path)
 
-        The CPU retry is primarily useful for whisper.cpp on systems where
-        CUDA/Vulkan is advertised but a runtime-lib mismatch (driver/cuDNN)
-        would otherwise abort inside ggml. Parakeet has its own internal
-        CPU fallback via onnxruntime's provider list.
-        """
         requested = (self.settings.get('compute_backend', 'auto') or 'auto').lower()
         self._apply_compute_backend()
         try:
@@ -459,6 +458,9 @@ class MainWindow(QWidget):
         any GPU → CPU fallback) over the user's saved setting, so the label
         reflects what actually ended up running rather than what was asked.
         """
+        if isinstance(self.engine, DeepgramEngine):
+            return "Cloud"
+
         backend = getattr(self, '_active_compute_backend', None)
         if backend is None:
             backend = self.settings.get("compute_backend", "cpu")
