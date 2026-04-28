@@ -1,7 +1,8 @@
-"""Factory that picks a transcription engine based on model path.
+"""Factory that picks a transcription engine based on model path or URI.
 
 Whisper: a single .bin file (whisper.cpp GGML format).
 Parakeet: a directory containing encoder-model*.onnx (onnx-asr format).
+Cloud: a sentinel URI like 'cloud://deepgram-nova-3'.
 """
 
 import glob
@@ -12,7 +13,14 @@ from engine.whisper_engine import WhisperEngine
 
 
 def make_engine(model_path: str, **kwargs):
-    """Return a transcription engine appropriate for the given model path."""
+    """Return a transcription engine appropriate for the given model path or URI."""
+    if model_path.startswith("cloud://"):
+        provider = model_path.removeprefix("cloud://")
+        if provider == "deepgram-nova-3":
+            from engine.deepgram_engine import DeepgramEngine
+            return DeepgramEngine(model="nova-3", language="en")
+        raise ValueError(f"Unknown cloud provider: {provider!r}")
+
     if not os.path.exists(model_path):
         raise ValueError(f"Model path does not exist: {model_path}")
 

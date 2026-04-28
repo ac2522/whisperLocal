@@ -72,3 +72,30 @@ def test_raises_for_directory_without_encoder(tmp_path, patched_engines):
 def test_raises_for_missing_path(patched_engines):
     with pytest.raises(ValueError, match="does not exist"):
         make_engine("/no/such/path/here")
+
+
+class TestCloudDispatch:
+    def test_returns_deepgram_for_cloud_uri(self):
+        with patch("engine.factory.WhisperEngine") as w, \
+             patch("engine.factory.ParakeetEngine") as p, \
+             patch("engine.deepgram_engine.DeepgramEngine") as d:
+            d.return_value = MagicMock(name="DeepgramEngineInstance")
+            from engine.factory import make_engine
+            make_engine("cloud://deepgram-nova-3")
+            d.assert_called_once_with(model="nova-3", language="en")
+            w.assert_not_called()
+            p.assert_not_called()
+
+    def test_raises_for_unknown_cloud_provider(self):
+        from engine.factory import make_engine
+        with pytest.raises(ValueError, match="Unknown cloud provider"):
+            make_engine("cloud://nope-not-real")
+
+    def test_cloud_uri_does_not_check_filesystem(self):
+        # cloud:// branch must run before the os.path.exists check.
+        with patch("engine.deepgram_engine.DeepgramEngine") as d:
+            d.return_value = MagicMock()
+            from engine.factory import make_engine
+            # No exception even though "cloud://deepgram-nova-3" is not a path.
+            make_engine("cloud://deepgram-nova-3")
+            d.assert_called_once()
