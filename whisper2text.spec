@@ -69,6 +69,21 @@ try:
 except Exception:
     xet_hiddens = []
 
+# keyring (used for Deepgram API key storage). Backends are loaded via
+# entry points, so we need the package metadata in the bundle plus the
+# Linux SecretService backend's transitive deps.
+from PyInstaller.utils.hooks import copy_metadata
+keyring_datas, keyring_bins, keyring_hiddens = collect_all('keyring')
+datas += keyring_datas
+binaries += keyring_bins
+datas += copy_metadata('keyring')
+
+# deepgram-sdk is imported lazily inside engine.deepgram_engine._load,
+# so PyInstaller's static analysis misses it.
+deepgram_datas, deepgram_bins, deepgram_hiddens = collect_all('deepgram')
+datas += deepgram_datas
+binaries += deepgram_bins
+
 # ── Hidden imports ──────────────────────────────────────────────────────
 hiddenimports = (
     pwcpp_hiddens
@@ -78,11 +93,20 @@ hiddenimports = (
     + onnxasr_hiddens
     + hf_hiddens
     + xet_hiddens
+    + keyring_hiddens
+    + deepgram_hiddens
     + collect_submodules('config')
     + collect_submodules('engine')
     + collect_submodules('audio')
     + collect_submodules('ui')
-    + ['pyperclip', 'pkg_resources', 'setuptools']
+    + [
+        'pyperclip', 'pkg_resources', 'setuptools',
+        # Linux Secret Service backend for keyring.
+        'keyring.backends.SecretService',
+        'secretstorage',
+        'jeepney',
+        'jeepney.io.blocking',
+    ]
 )
 
 # ── Analysis ────────────────────────────────────────────────────────────
