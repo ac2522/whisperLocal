@@ -25,6 +25,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from config import api_keys
+
 
 class DownloadThread(QThread):
     """Background thread that downloads a Whisper model.
@@ -100,6 +102,7 @@ class SettingsDialog(QDialog):
         tab_model_layout = QVBoxLayout(tab_model)
         tab_model_layout.addWidget(self._build_model_group())
         tab_model_layout.addWidget(self._build_compute_group())
+        tab_model_layout.addWidget(self._build_deepgram_group())
         tab_model_layout.addStretch()
         tabs.addTab(tab_model, "Model && Compute")
 
@@ -139,8 +142,11 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _format_model_label(model: dict) -> str:
-        """Format '[Whisper] ggml-base.bin (142 MB)' or the Parakeet equivalent."""
-        engine_tag = "Parakeet" if model.get("type") == "parakeet" else "Whisper"
+        """Format dropdown label per engine type."""
+        t = model.get("type")
+        if t == "cloud":
+            return f"[Cloud] {model['name']}"
+        engine_tag = "Parakeet" if t == "parakeet" else "Whisper"
         return f"[{engine_tag}] {model['name']} ({model['size_mb']} MB)"
 
     def _build_model_group(self):
@@ -158,6 +164,8 @@ class SettingsDialog(QDialog):
         dl_row = QHBoxLayout()
         self._download_combo = QComboBox()
         for m in self._model_manager.list_available():
+            if m.get("type") == "cloud":
+                continue  # Cloud entries don't need downloading.
             self._download_combo.addItem(self._format_model_label(m), m["name"])
         dl_row.addWidget(self._download_combo)
 
@@ -307,6 +315,86 @@ class SettingsDialog(QDialog):
         group.setLayout(vbox)
         return group
 
+    def _build_deepgram_group(self):
+        group = QGroupBox("Deepgram API Key")
+        vbox = QVBoxLayout()
+
+        self._deepgram_status_label = QLabel()
+        vbox.addWidget(self._deepgram_status_label)
+
+        row = QHBoxLayout()
+        self._deepgram_key_edit = QLineEdit()
+        self._deepgram_key_edit.setEchoMode(QLineEdit.Password)
+        self._deepgram_key_edit.setPlaceholderText("Paste API key, then press Save")
+        row.addWidget(self._deepgram_key_edit)
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._save_deepgram_key)
+        row.addWidget(save_btn)
+        vbox.addLayout(row)
+
+        clear_btn = QPushButton("Clear stored key")
+        clear_btn.clicked.connect(self._clear_deepgram_key)
+        vbox.addWidget(clear_btn)
+
+        tip = QLabel("Tip: env var DEEPGRAM_API_KEY overrides the stored key.")
+        tip.setStyleSheet("color: gray;")
+        vbox.addWidget(tip)
+
+        group.setLayout(vbox)
+        self._refresh_deepgram_status()
+        return group
+
+    def _refresh_deepgram_status(self) -> None:
+        source = api_keys.get_key_source()
+        if source == "env":
+            self._deepgram_status_label.setText(
+                "Status: ● Configured (via DEEPGRAM_API_KEY env var)"
+            )
+        elif source == "keyring":
+            self._deepgram_status_label.setText(
+                "Status: ● Configured (in OS keyring)"
+            )
+        else:
+            self._deepgram_status_label.setText("Status: ○ Not set")
+
+    def _save_deepgram_key(self) -> None:
+        value = self._deepgram_key_edit.text().strip()
+        if not value:
+            QMessageBox.warning(
+                self, "Empty key", "Enter a key before pressing Save."
+            )
+            return
+        try:
+            api_keys.set_deepgram_key(value)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Keyring error", f"Failed to save key:\n{exc}"
+            )
+            return
+        self._deepgram_key_edit.clear()
+        self._refresh_deepgram_status()
+        QMessageBox.information(self, "Saved", "Deepgram API key saved.")
+
+    def _clear_deepgram_key(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Confirm",
+            "Remove the stored Deepgram API key?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            api_keys.clear_deepgram_key()
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Keyring error", f"Failed to clear key:\n{exc}"
+            )
+            return
+        self._refresh_deepgram_status()
+
     def _build_hotkey_group(self):
         group = QGroupBox("Hotkey")
         vbox = QVBoxLayout()
@@ -424,6 +512,17 @@ class SettingsDialog(QDialog):
         if model_name is None:
             return
 
+        # Cloud entries have nothing to delete on disk.
+        from engine.model_manager import _MODELS_BY_NAME
+        known = _MODELS_BY_NAME.get(model_name)
+        if known and known.get("type") == "cloud":
+            QMessageBox.information(
+                self,
+                "Cloud model",
+                "Cloud models are not stored locally and cannot be deleted.",
+            )
+            return
+
         reply = QMessageBox.question(
             self,
             "Confirm Delete",
@@ -446,6 +545,20 @@ class SettingsDialog(QDialog):
         model_name = self._model_combo.currentData()
         if model_name is not None:
             self._settings.set("model_size", model_name)
+            from engine.model_manager import _MODELS_BY_NAME
+            known = _MODELS_BY_NAME.get(model_name)
+            if (
+                known
+                and known.get("type") == "cloud"
+                and not api_keys.has_deepgram_key()
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Deepgram API key not set",
+                    "You selected Deepgram Nova-3 but no API key is configured. "
+                    "Set DEEPGRAM_API_KEY or save a key in this dialog before "
+                    "recording, otherwise transcription will fail.",
+                )
 
         # Compute backend
         self._settings.set("compute_backend", self._compute_combo.currentData())
