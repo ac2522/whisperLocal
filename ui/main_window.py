@@ -227,19 +227,17 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _load_initial_engine(self):
-        """Load the WhisperEngine from the saved model setting.
+        """Load the active engine from the saved model setting.
 
-        Handles the old model_size format (e.g. 'base' -> 'ggml-base.bin').
-        Falls back to any available model if the saved one is not found.
-        Returns None if no models are available.
+        Migration of legacy whisper short-names (e.g. 'base' ->
+        'ggml-base.bin') is handled centrally in
+        ``config.settings.SettingsManager._migrate``; this method does
+        not mutate ``model_size`` so Parakeet directory names and cloud
+        sentinel entries are preserved verbatim. Falls back to any
+        available model if the saved one is not found. Returns None if
+        no engines can be constructed.
         """
         model_size = self.settings.get('model_size')
-
-        # Handle old format: if model_size doesn't end in '.bin', convert it
-        if model_size and not model_size.endswith('.bin'):
-            model_size = f'ggml-{model_size}.bin'
-            self.settings.set('model_size', model_size)
-            self.settings.save()
 
         # Try to load the saved model
         if model_size:

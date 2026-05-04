@@ -212,3 +212,50 @@ class TestModelSizeMigration:
 
         sm = SettingsManager(settings_dir=tmp_settings_dir)
         assert sm.get('model_size') == 'ggml-medium.bin'
+
+    # ── Non-whisper model names must NOT be migrated ──────────────────
+    # The earlier migration was over-broad: any value not ending in
+    # ``.bin`` was rewritten to ``ggml-<name>.bin``. That mangled
+    # Parakeet directory names and cloud sentinel entries, so on every
+    # relaunch the saved model would be replaced by a fallback.
+
+    def test_parakeet_dir_name_unchanged(self):
+        assert _migrate_model_size('parakeet-tdt-0.6b-v3-int8') \
+            == 'parakeet-tdt-0.6b-v3-int8'
+
+    def test_parakeet_v2_dir_name_unchanged(self):
+        assert _migrate_model_size('parakeet-tdt-0.6b-v2-int8') \
+            == 'parakeet-tdt-0.6b-v2-int8'
+
+    def test_partial_download_unchanged(self):
+        # In-flight download artifacts must round-trip without mangling
+        # so the eventual rename to the real name still matches.
+        assert _migrate_model_size('parakeet-tdt-0.6b-v2-int8.partial') \
+            == 'parakeet-tdt-0.6b-v2-int8.partial'
+
+    def test_cloud_sentinel_name_unchanged(self):
+        assert _migrate_model_size('deepgram-nova-3') == 'deepgram-nova-3'
+
+    def test_unknown_string_unchanged(self):
+        # Strings that look nothing like the legacy short names should
+        # pass through; the engine factory will raise a clear error.
+        assert _migrate_model_size('something-else-entirely') \
+            == 'something-else-entirely'
+
+    def test_parakeet_survives_save_and_reload(self, tmp_settings_dir):
+        """End-to-end: pick Parakeet, save, reload — must still be Parakeet."""
+        sm1 = SettingsManager(settings_dir=tmp_settings_dir)
+        sm1.set('model_size', 'parakeet-tdt-0.6b-v3-int8')
+        sm1.save()
+
+        sm2 = SettingsManager(settings_dir=tmp_settings_dir)
+        assert sm2.get('model_size') == 'parakeet-tdt-0.6b-v3-int8'
+
+    def test_cloud_survives_save_and_reload(self, tmp_settings_dir):
+        """End-to-end: pick Deepgram, save, reload — must still be Deepgram."""
+        sm1 = SettingsManager(settings_dir=tmp_settings_dir)
+        sm1.set('model_size', 'deepgram-nova-3')
+        sm1.save()
+
+        sm2 = SettingsManager(settings_dir=tmp_settings_dir)
+        assert sm2.get('model_size') == 'deepgram-nova-3'

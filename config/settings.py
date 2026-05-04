@@ -28,17 +28,30 @@ DEFAULT_SETTINGS = {
 }
 
 
-def _migrate_model_size(model_size):
-    """Migrate old model_size format to new format.
+# Old whisper short-name format (pre-2025). Migrated to ``ggml-<name>.bin``.
+# Anything not in this set is left unchanged so Parakeet directory names
+# (``parakeet-tdt-0.6b-v3-int8``) and cloud sentinel entries
+# (``deepgram-nova-3``) are not mangled into bogus ggml filenames.
+_OLD_WHISPER_NAMES = frozenset([
+    'tiny', 'tiny.en',
+    'base', 'base.en',
+    'small', 'small.en',
+    'medium', 'medium.en',
+    'large', 'large-v1', 'large-v2', 'large-v3',
+])
 
-    Old format stored the model size as a bare name like 'base'.
-    New format uses the full filename like 'ggml-base.bin'.
+
+def _migrate_model_size(model_size):
+    """Migrate old-format whisper short names to the new filename format.
+
+    Old format stored the model size as a bare name like ``'base'``.
+    New format uses the full filename like ``'ggml-base.bin'``. Any value
+    that does not match a known old-format name is returned unchanged so
+    Parakeet directory names and cloud sentinel entries are preserved.
     """
-    if model_size is None:
-        return model_size
     if not isinstance(model_size, str):
         return model_size
-    if not model_size.endswith('.bin'):
+    if model_size in _OLD_WHISPER_NAMES:
         return f'ggml-{model_size}.bin'
     return model_size
 
