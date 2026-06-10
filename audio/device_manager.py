@@ -1,93 +1,158 @@
-"""Audio device discovery and selection using PyAudio."""
+"""Audio source discovery via PipeWire (pw-dump).
 
-import pyaudio
+Replaces the old PyAudio/ALSA enumeration, which surfaced raw ``hw:``
+devices (exclusive-access traps that fail with ``-9985 Device
+unavailable`` while PipeWire holds the hardware) and meaningless
+aliases (``default``, ``pipewire``).  PipeWire's node list contains
+exactly the real microphones, with stable names and human-readable
+descriptions.
+"""
+
+import json
+import logging
+import subprocess
+
+logger = logging.getLogger(__name__)
+
+PW_DUMP_TIMEOUT = 2.0
 
 
 class DeviceManager:
-    """Enumerate and select audio input devices."""
+    """Enumerate PipeWire audio sources and resolve the recording target.
 
-    def __init__(self):
-        self._pa = pyaudio.PyAudio()
+    Selection is stored by ``node.name`` (stable across hotplug/reboot),
+    never by index.  All methods degrade gracefully when ``pw-dump`` is
+    unavailable: the app then behaves as if only the system default
+    exists, which is the pre-PipeWire-aware behaviour.
+    """
+
+    def _pw_dump(self):
+        """Run ``pw-dump`` and return the parsed object list, or None."""
+        try:
+            result = subprocess.run(
+                ["pw-dump"],
+                capture_output=True,
+                text=True,
+                timeout=PW_DUMP_TIMEOUT,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning("pw-dump unavailable: %s", e)
+            return None
+        if result.returncode != 0:
+            logger.warning("pw-dump exited with %d", result.returncode)
+            return None
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("pw-dump produced invalid JSON: %s", e)
+            return None
+        if not data:
+            logger.warning("pw-dump produced no objects")
+            return None
+        return data
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def _ensure_pa(self) -> None:
-        """Re-initialize PyAudio if it has been terminated."""
-        if self._pa is None:
-            self._pa = pyaudio.PyAudio()
+    def list_sources(self):
+        """Return every real microphone as a list of dicts.
 
-    def list_input_devices(self) -> list[dict]:
-        """Return a list of dicts for every device with input channels.
-
-        Each dict contains the keys: index, name, channels, sample_rate.
-        Devices that raise an exception when queried are silently skipped.
+        Each dict has the keys ``node_name``, ``description`` and ``id``.
+        Only nodes with ``media.class == "Audio/Source"`` are included,
+        which excludes sink monitors, playback streams and virtual
+        devices.  Returns ``[]`` when PipeWire can't be queried.
         """
-        self._ensure_pa()
-        devices: list[dict] = []
-        for i in range(self._pa.get_device_count()):
-            try:
-                info = self._pa.get_device_info_by_index(i)
-                if info.get("maxInputChannels", 0) > 0:
-                    devices.append(self._to_dict(i, info))
-            except Exception:
-                continue
-        return devices
+        data = self._pw_dump()
+        if data is None:
+            return []
+        return self._extract_sources(data)
 
-    def get_default_device(self) -> dict | None:
-        """Return the default input device as a dict, or *None* on error."""
-        self._ensure_pa()
-        try:
-            info = self._pa.get_default_input_device_info()
-            return self._to_dict(info["index"], info)
-        except Exception:
+    def get_default_source(self):
+        """Return the current system-default source dict, or None.
+
+        Reads the ``default.audio.source`` key from PipeWire's "default"
+        metadata object (the *current* default — not
+        ``default.configured.audio.source``, which names the user's
+        preference even when that device is unplugged).
+        """
+        data = self._pw_dump()
+        if data is None:
             return None
 
-    def get_device_by_index(self, index: int) -> dict:
-        """Return the device at *index*.
+        default_name = None
+        for obj in data:
+            if "Metadata" not in obj.get("type", ""):
+                continue
+            if obj.get("props", {}).get("metadata.name") != "default":
+                continue
+            for entry in obj.get("metadata", []):
+                if entry.get("key") == "default.audio.source":
+                    default_name = (entry.get("value") or {}).get("name")
+                    break
+            break
 
-        If the index is invalid or the device has no input channels the
-        method falls back to the default input device.
+        if not default_name:
+            return None
+        for src in self._extract_sources(data):
+            if src["node_name"] == default_name:
+                return src
+        return None
+
+    def find_source(self, node_name):
+        """Return the source dict for *node_name*, or None if absent."""
+        for src in self.list_sources():
+            if src["node_name"] == node_name:
+                return src
+        return None
+
+    def resolve_target(self, saved_node, saved_label):
+        """Resolve the saved mic choice against currently-present sources.
+
+        Returns ``(target_node_or_None, human_label)``.  ``None`` as the
+        target means "record from the system default".  When the saved
+        mic isn't connected the label says so explicitly, so a fallback
+        recording is never silent about which mic it used.
         """
-        self._ensure_pa()
-        try:
-            info = self._pa.get_device_info_by_index(index)
-            if info.get("maxInputChannels", 0) > 0:
-                return self._to_dict(index, info)
-        except Exception:
-            pass
+        default = self.get_default_source()
+        default_desc = default["description"] if default else "System Default"
 
-        # Fallback to default device
-        return self.get_default_device()
+        if saved_node is None:
+            return None, default_desc
 
-    def cleanup(self) -> None:
-        """Terminate the PyAudio instance. Safe to call multiple times."""
-        if self._pa is not None:
-            try:
-                self._pa.terminate()
-            except Exception:
-                pass
-            self._pa = None
+        found = self.find_source(saved_node)
+        if found is not None:
+            return saved_node, found["description"]
 
-    def refresh(self) -> None:
-        """Re-enumerate audio devices by restarting the PyAudio instance.
+        return None, (
+            f"{default_desc} (fallback — "
+            f"{saved_label or saved_node} not connected)"
+        )
 
-        PyAudio caches its device list at init time, so a re-init is the
-        only reliable way to pick up devices plugged in after startup.
-        """
-        self.cleanup()
-        self._ensure_pa()
+    # ------------------------------------------------------------------
+    # Compatibility no-ops
+    # ------------------------------------------------------------------
+
+    def refresh(self):
+        """No-op. pw-dump is re-run on every query, so nothing is cached."""
+
+    def cleanup(self):
+        """No-op. No resources are held between queries."""
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _to_dict(index: int, info: dict) -> dict:
-        return {
-            "index": index,
-            "name": info.get("name", ""),
-            "channels": info.get("maxInputChannels", 0),
-            "sample_rate": info.get("defaultSampleRate", 0.0),
-        }
+    def _extract_sources(data):
+        sources = []
+        for obj in data:
+            props = obj.get("info", {}).get("props", {})
+            if props.get("media.class") != "Audio/Source":
+                continue
+            sources.append({
+                "node_name": props.get("node.name", ""),
+                "description": props.get("node.description", ""),
+                "id": obj.get("id"),
+            })
+        return sources

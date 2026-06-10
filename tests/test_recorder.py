@@ -1,5 +1,6 @@
 """Tests for audio.recorder.Recorder (PyAudio is mocked)."""
 
+import os
 import struct
 import threading
 import time
@@ -8,13 +9,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from audio.recorder import (
-    WHISPER_RATE, CHUNK_DURATION_MS,
-    Recorder, _validate_device, _pick_sample_rate,
-)
+from audio.recorder import Recorder
 
-# Use the whisper target rate for mock chunks
-_CHUNK_SAMPLES = int(WHISPER_RATE * CHUNK_DURATION_MS / 1000)
+# The recorder always records at 16 kHz; the PipeWire ALSA PCM resamples.
+RATE = 16000
+CHUNK_DURATION_MS = 30
+_CHUNK_SAMPLES = int(RATE * CHUNK_DURATION_MS / 1000)
 
 
 def _make_fake_chunk(value: int = 1000, n_samples: int = _CHUNK_SAMPLES) -> bytes:
@@ -30,74 +30,26 @@ def mock_pyaudio():
 
     fake_pa_instance = MagicMock()
     fake_pa_instance.open.return_value = fake_stream
-    fake_pa_instance.is_format_supported.return_value = True
-    fake_pa_instance.get_device_info_by_index.return_value = {
-        "name": "Test Mic",
-        "maxInputChannels": 2,
-        "defaultSampleRate": 44100.0,
-    }
 
     with patch("audio.recorder.pyaudio.PyAudio", return_value=fake_pa_instance):
         yield fake_pa_instance, fake_stream
 
 
-# -----------------------------------------------------------------------
-# _validate_device tests
-# -----------------------------------------------------------------------
-
-class TestValidateDevice:
-    """Tests for device index validation."""
-
-    def test_none_returns_none(self):
-        pa = MagicMock()
-        assert _validate_device(pa, None) is None
-
-    def test_valid_device_returns_index(self):
-        pa = MagicMock()
-        pa.get_device_info_by_index.return_value = {
-            "name": "Mic", "maxInputChannels": 1,
-        }
-        assert _validate_device(pa, 5) == 5
-
-    def test_device_with_no_input_channels_returns_none(self):
-        pa = MagicMock()
-        pa.get_device_info_by_index.return_value = {
-            "name": "Speakers", "maxInputChannels": 0,
-        }
-        assert _validate_device(pa, 3) is None
-
-    def test_nonexistent_device_returns_none(self):
-        pa = MagicMock()
-        pa.get_device_info_by_index.side_effect = IOError("Invalid device")
-        assert _validate_device(pa, 99) is None
-
-    def test_oserror_returns_none(self):
-        pa = MagicMock()
-        pa.get_device_info_by_index.side_effect = OSError("No such device")
-        assert _validate_device(pa, 11) is None
+@pytest.fixture
+def no_pipewire_node(monkeypatch):
+    """Ensure PIPEWIRE_NODE is unset before the test starts."""
+    monkeypatch.delenv("PIPEWIRE_NODE", raising=False)
 
 
-# -----------------------------------------------------------------------
-# _pick_sample_rate tests
-# -----------------------------------------------------------------------
+def _stop_after_first_read(recorder, stream, chunk=None):
+    """Make the mocked stream stop the recorder after its first read."""
+    payload = chunk or _make_fake_chunk()
 
-class TestPickSampleRate:
-    """Tests for sample rate selection."""
+    def _read(*args, **kwargs):
+        recorder.stop()
+        return payload
 
-    def test_none_device_returns_whisper_rate(self):
-        pa = MagicMock()
-        assert _pick_sample_rate(pa, None) == WHISPER_RATE
-
-    def test_supported_device_returns_whisper_rate(self):
-        pa = MagicMock()
-        pa.is_format_supported.return_value = True
-        assert _pick_sample_rate(pa, 0) == WHISPER_RATE
-
-    def test_unsupported_rate_returns_native_rate(self):
-        pa = MagicMock()
-        pa.is_format_supported.side_effect = ValueError("unsupported")
-        pa.get_device_info_by_index.return_value = {"defaultSampleRate": 44100.0}
-        assert _pick_sample_rate(pa, 0) == 44100
+    stream.read.side_effect = _read
 
 
 # -----------------------------------------------------------------------
@@ -105,32 +57,187 @@ class TestPickSampleRate:
 # -----------------------------------------------------------------------
 
 class TestRecorderInit:
-    """Tests for Recorder initialization."""
+    """Recorder takes a target_node (PipeWire node name), not a device index."""
 
-    def test_invalid_device_falls_back_to_default(self, mock_pyaudio):
-        pa_instance, _ = mock_pyaudio
-        pa_instance.get_device_info_by_index.side_effect = IOError("bad device")
-        recorder = Recorder(device_index=99)
-        assert recorder._device_index is None
+    def test_default_target_node_is_none(self, mock_pyaudio):
+        recorder = Recorder()
+        assert recorder.target_node is None
         recorder.cleanup()
 
-    def test_output_only_device_falls_back_to_default(self, mock_pyaudio):
-        pa_instance, _ = mock_pyaudio
-        pa_instance.get_device_info_by_index.return_value = {
-            "name": "Speakers", "maxInputChannels": 0,
-        }
-        recorder = Recorder(device_index=3)
-        assert recorder._device_index is None
+    def test_target_node_is_stored(self, mock_pyaudio):
+        recorder = Recorder(target_node="alsa_input.usb-foo.analog-stereo")
+        assert recorder.target_node == "alsa_input.usb-foo.analog-stereo"
         recorder.cleanup()
 
-    def test_valid_device_is_kept(self, mock_pyaudio):
-        recorder = Recorder(device_index=5)
-        assert recorder._device_index == 5
+    def test_target_node_is_mutable(self, mock_pyaudio):
+        recorder = Recorder(target_node="old.node")
+        recorder.target_node = "new.node"
+        assert recorder.target_node == "new.node"
         recorder.cleanup()
 
-    def test_none_device_stays_none(self, mock_pyaudio):
-        recorder = Recorder(device_index=None)
-        assert recorder._device_index is None
+
+# -----------------------------------------------------------------------
+# PIPEWIRE_NODE environment handling
+# -----------------------------------------------------------------------
+
+class TestPipewireNodeEnv:
+    """The recorder routes audio via the PIPEWIRE_NODE env var around pa.open."""
+
+    def test_env_set_during_open_and_removed_after(
+            self, mock_pyaudio, no_pipewire_node):
+        pa_instance, stream = mock_pyaudio
+        recorder = Recorder(target_node="my.target.node")
+        _stop_after_first_read(recorder, stream)
+
+        seen_env = {}
+
+        def _open(**kwargs):
+            seen_env["value"] = os.environ.get("PIPEWIRE_NODE")
+            return stream
+
+        pa_instance.open.side_effect = _open
+
+        recorder.record_button_mode()
+
+        assert seen_env["value"] == "my.target.node"
+        assert "PIPEWIRE_NODE" not in os.environ
+        recorder.cleanup()
+
+    def test_preexisting_env_value_is_restored(self, mock_pyaudio, monkeypatch):
+        monkeypatch.setenv("PIPEWIRE_NODE", "xyz")
+        pa_instance, stream = mock_pyaudio
+        recorder = Recorder(target_node="my.target.node")
+        _stop_after_first_read(recorder, stream)
+
+        seen_env = {}
+
+        def _open(**kwargs):
+            seen_env["value"] = os.environ.get("PIPEWIRE_NODE")
+            return stream
+
+        pa_instance.open.side_effect = _open
+
+        recorder.record_button_mode()
+
+        assert seen_env["value"] == "my.target.node"
+        assert os.environ.get("PIPEWIRE_NODE") == "xyz"
+        recorder.cleanup()
+
+    def test_open_failure_restores_env_and_propagates(
+            self, mock_pyaudio, no_pipewire_node):
+        pa_instance, _stream = mock_pyaudio
+        pa_instance.open.side_effect = OSError("[Errno -9996] Invalid device")
+
+        recorder = Recorder(target_node="my.target.node")
+        with pytest.raises(OSError):
+            recorder.record_button_mode()
+
+        assert "PIPEWIRE_NODE" not in os.environ
+        assert not recorder.is_recording
+        recorder.cleanup()
+
+    def test_open_failure_restores_preexisting_env(
+            self, mock_pyaudio, monkeypatch):
+        monkeypatch.setenv("PIPEWIRE_NODE", "xyz")
+        pa_instance, _stream = mock_pyaudio
+        pa_instance.open.side_effect = OSError("boom")
+
+        recorder = Recorder(target_node="my.target.node")
+        with pytest.raises(OSError):
+            recorder.record_button_mode()
+
+        assert os.environ.get("PIPEWIRE_NODE") == "xyz"
+        assert not recorder.is_recording
+        recorder.cleanup()
+
+    def test_none_target_does_not_touch_env_or_pass_device_index(
+            self, mock_pyaudio, no_pipewire_node):
+        pa_instance, stream = mock_pyaudio
+        recorder = Recorder(target_node=None)
+        _stop_after_first_read(recorder, stream)
+
+        seen_env = {}
+
+        def _open(**kwargs):
+            seen_env["value"] = os.environ.get("PIPEWIRE_NODE")
+            return stream
+
+        pa_instance.open.side_effect = _open
+
+        recorder.record_button_mode()
+
+        assert seen_env["value"] is None
+        assert "PIPEWIRE_NODE" not in os.environ
+        _args, kwargs = pa_instance.open.call_args
+        assert "input_device_index" not in kwargs
+        recorder.cleanup()
+
+    def test_open_always_uses_default_device_at_16k(self, mock_pyaudio):
+        """Even with a target node, no input_device_index and rate is 16000."""
+        pa_instance, stream = mock_pyaudio
+        recorder = Recorder(target_node="my.target.node")
+        _stop_after_first_read(recorder, stream)
+
+        recorder.record_button_mode()
+
+        _args, kwargs = pa_instance.open.call_args
+        assert "input_device_index" not in kwargs
+        assert kwargs["rate"] == 16000
+        assert kwargs["input"] is True
+        recorder.cleanup()
+
+    def test_silence_mode_sets_and_restores_env(
+            self, mock_pyaudio, no_pipewire_node):
+        pa_instance, stream = mock_pyaudio
+        recorder = Recorder(target_node="my.target.node")
+
+        seen_env = {}
+
+        def _open(**kwargs):
+            seen_env["value"] = os.environ.get("PIPEWIRE_NODE")
+            return stream
+
+        pa_instance.open.side_effect = _open
+
+        fake_vad = MagicMock()
+        fake_vad.chunk_samples = 512
+        fake_vad.sample_rate = 16000
+
+        call_count = [0]
+
+        def _is_speech(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                recorder.stop()
+            return False
+
+        fake_vad.is_speech.side_effect = _is_speech
+
+        with patch("audio.recorder.ensure_vad_model"), \
+             patch("audio.recorder.SileroVAD", return_value=fake_vad):
+            recorder.record_silence_mode(vad_aggressiveness=1, break_length=1)
+
+        assert seen_env["value"] == "my.target.node"
+        assert "PIPEWIRE_NODE" not in os.environ
+        recorder.cleanup()
+
+    def test_silence_mode_open_failure_restores_env(
+            self, mock_pyaudio, no_pipewire_node):
+        pa_instance, _stream = mock_pyaudio
+        pa_instance.open.side_effect = OSError("[Errno -9993] Illegal combination")
+
+        recorder = Recorder(target_node="my.target.node")
+        with patch("audio.recorder.ensure_vad_model"), \
+             patch("audio.recorder.SileroVAD") as mock_vad_cls:
+            mock_vad = MagicMock()
+            mock_vad.chunk_samples = 512
+            mock_vad.sample_rate = 16000
+            mock_vad_cls.return_value = mock_vad
+            with pytest.raises(OSError):
+                recorder.record_silence_mode()
+
+        assert "PIPEWIRE_NODE" not in os.environ
+        assert not recorder.is_recording
         recorder.cleanup()
 
 
@@ -240,7 +347,7 @@ class TestToFloat32:
     def test_converts_to_float32(self, mock_pyaudio):
         recorder = Recorder()
         raw = struct.pack("<4h", -32768, -16384, 0, 32767)
-        result = recorder._to_float32(raw, WHISPER_RATE)
+        result = recorder._to_float32(raw)
 
         assert result.dtype == np.float32
         assert result.min() >= -1.0
@@ -277,47 +384,39 @@ class TestRecordSilenceModeSilero:
 
     @pytest.fixture
     def mock_pyaudio_stream(self):
-        """Fake PyAudio stream yielding a scripted sequence of chunks."""
+        """Fake PyAudio stream for scripted silence-mode runs."""
         with patch("audio.recorder.pyaudio.PyAudio") as pa_cls:
             pa = MagicMock()
             pa_cls.return_value = pa
-            # device validation + sample rate picks
-            pa.get_device_info_by_index.return_value = {
-                "index": 0, "name": "mock", "maxInputChannels": 1,
-                "defaultSampleRate": 16000.0,
-            }
-            pa.is_format_supported.return_value = True
             stream = MagicMock()
             pa.open.return_value = stream
             yield pa, stream
 
     def test_surfaces_download_failure(self, mock_pyaudio_stream):
-        from audio.recorder import Recorder
         pa, stream = mock_pyaudio_stream
         with patch("audio.recorder.ensure_vad_model",
                    side_effect=RuntimeError("network down")):
-            rec = Recorder(device_index=0)
+            rec = Recorder()
             with pytest.raises(RuntimeError, match="network down"):
                 rec.record_silence_mode(vad_aggressiveness=1, break_length=1)
 
     def test_resets_vad_before_use(self, mock_pyaudio_stream):
-        from audio.recorder import Recorder
         pa, stream = mock_pyaudio_stream
         # One 30ms chunk of silence then stop flag trips
         stream.read.side_effect = [b"\x00" * 960] * 200
 
         fake_vad = MagicMock()
-        fake_vad.is_speech.return_value = False  # never sees speech → loop body exits when stop set
+        fake_vad.is_speech.return_value = False
         fake_vad.sample_rate = 16000
         fake_vad.chunk_samples = 512
 
         with patch("audio.recorder.ensure_vad_model"), \
              patch("audio.recorder.SileroVAD", return_value=fake_vad):
-            rec = Recorder(device_index=0)
+            rec = Recorder()
 
             # Stop after a few reads so the test terminates
             call_count = [0]
-            original_is_speech = fake_vad.is_speech
+
             def counting_is_speech(*a, **kw):
                 call_count[0] += 1
                 if call_count[0] >= 3:
@@ -330,7 +429,6 @@ class TestRecordSilenceModeSilero:
 
     def test_stops_after_break_length_of_silence_post_speech(self, mock_pyaudio_stream):
         """Scripted: 1 s of speech then 2 s of silence with break_length=2."""
-        from audio.recorder import Recorder
         pa, stream = mock_pyaudio_stream
         # 30ms chunks at 16kHz = 480 int16 samples = 960 bytes
         stream.read.return_value = b"\x00" * 960
@@ -348,7 +446,7 @@ class TestRecordSilenceModeSilero:
 
         with patch("audio.recorder.ensure_vad_model"), \
              patch("audio.recorder.SileroVAD", return_value=fake_vad):
-            rec = Recorder(device_index=0)
+            rec = Recorder()
             audio = rec.record_silence_mode(vad_aggressiveness=1, break_length=2)
 
         # is_speech was called enough times to reach break_length silence
@@ -362,11 +460,10 @@ class TestRecordSilenceModeSilero:
         assert audio.min() >= -1.0
 
     def test_stream_cleaned_up_on_vad_error(self, mock_pyaudio_stream):
-        from audio.recorder import Recorder
         pa, stream = mock_pyaudio_stream
         with patch("audio.recorder.ensure_vad_model",
                    side_effect=RuntimeError("model download failed")):
-            rec = Recorder(device_index=0)
+            rec = Recorder()
             with pytest.raises(RuntimeError):
                 rec.record_silence_mode(vad_aggressiveness=1, break_length=1)
         # Stream was never opened because ensure_vad_model failed first.

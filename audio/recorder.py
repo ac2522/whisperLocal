@@ -1,9 +1,9 @@
 """Audio recording module with button-mode and silence-detection modes."""
 
+import contextlib
 import logging
-import threading
-
 import os
+import threading
 
 import numpy as np
 import pyaudio
@@ -24,61 +24,39 @@ FORMAT = pyaudio.paInt16
 CHUNK_DURATION_MS = 30
 
 
-def _validate_device(pa: pyaudio.PyAudio, device_index: int | None) -> int | None:
-    """Validate that device_index is a usable input device.
+@contextlib.contextmanager
+def _pipewire_target(node_name):
+    """Point the PipeWire ALSA plugin at *node_name* for the enclosed open().
 
-    Returns the device_index if valid, or None (system default) if the device
-    doesn't exist or can't be used for mono input.  This prevents PortAudio
-    native crashes (SEGV) that occur when open() is called with an invalid device.
+    The plugin reads ``PIPEWIRE_NODE`` when the PCM is opened; outside that
+    window the variable must not linger or it would leak into unrelated
+    subprocesses (ydotool, pw-dump).  Recordings are serialized by
+    ``Recorder.is_recording`` so the process-global variable is not racy.
+    If the named node has vanished, PipeWire links the stream to the
+    default source instead — exactly the fallback behaviour we want.
     """
-    if device_index is None:
-        return None
+    if not node_name:
+        yield
+        return
+    prior = os.environ.get("PIPEWIRE_NODE")
+    os.environ["PIPEWIRE_NODE"] = node_name
     try:
-        info = pa.get_device_info_by_index(device_index)
-        if info.get("maxInputChannels", 0) < CHANNELS:
-            logger.warning(
-                "Device %d (%s) has no input channels, falling back to default",
-                device_index, info.get("name", "unknown"),
-            )
-            return None
-        return device_index
-    except Exception as e:
-        logger.warning(
-            "Device index %d is invalid (%s), falling back to default",
-            device_index, e,
-        )
-        return None
-
-
-def _pick_sample_rate(pa: pyaudio.PyAudio, device_index: int | None) -> int:
-    """Return WHISPER_RATE if the device supports it, otherwise its native rate."""
-    if device_index is not None:
-        try:
-            pa.is_format_supported(
-                WHISPER_RATE,
-                input_device=device_index,
-                input_channels=CHANNELS,
-                input_format=FORMAT,
-            )
-            return WHISPER_RATE
-        except ValueError:
-            info = pa.get_device_info_by_index(device_index)
-            return int(info["defaultSampleRate"])
-    return WHISPER_RATE
-
-
-def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """Resample int16 audio from *src_rate* to *dst_rate* using linear interpolation."""
-    if src_rate == dst_rate:
-        return audio
-    duration = len(audio) / src_rate
-    n_samples = int(duration * dst_rate)
-    indices = np.linspace(0, len(audio) - 1, n_samples)
-    return np.interp(indices, np.arange(len(audio)), audio.astype(np.float64)).astype(audio.dtype)
+        yield
+    finally:
+        if prior is None:
+            os.environ.pop("PIPEWIRE_NODE", None)
+        else:
+            os.environ["PIPEWIRE_NODE"] = prior
 
 
 class Recorder:
     """Record audio from the microphone.
+
+    Always opens PortAudio's default input device, which routes through
+    PipeWire's shared ALSA PCM — never a raw ``hw:`` device, so recording
+    can't fail with exclusive-access errors.  A specific microphone is
+    selected by setting :attr:`target_node` to a PipeWire ``node.name``
+    before recording starts.
 
     Supports two recording modes:
       * **button mode** -- record while a button is held, stop on release.
@@ -86,16 +64,16 @@ class Recorder:
 
     Parameters
     ----------
-    device_index : int or None
-        PyAudio input device index.  ``None`` uses the system default.
+    target_node : str or None
+        PipeWire source ``node.name`` to record from.  ``None`` records
+        from the system default source.
     """
 
-    def __init__(self, device_index=None):
+    def __init__(self, target_node=None):
         self._pa = pyaudio.PyAudio()
-        self._device_index = _validate_device(self._pa, device_index)
+        self.target_node = target_node
         self._recording = False
         self._lock = threading.Lock()
-        self._hw_rate = _pick_sample_rate(self._pa, self._device_index)
 
     # ------------------------------------------------------------------
     # Thread-safe recording flag
@@ -112,6 +90,30 @@ class Recorder:
             return self._recording
 
     # ------------------------------------------------------------------
+    # Stream handling
+    # ------------------------------------------------------------------
+    def _open_stream(self, chunk):
+        """Open the capture stream, targeting :attr:`target_node` if set.
+
+        On failure the recording flag is cleared and the exception
+        propagates to the caller.
+        """
+        stream_kwargs = {
+            "format": FORMAT,
+            "channels": CHANNELS,
+            "rate": WHISPER_RATE,
+            "input": True,
+            "frames_per_buffer": chunk,
+        }
+        try:
+            with _pipewire_target(self.target_node):
+                return self._pa.open(**stream_kwargs)
+        except Exception:
+            with self._lock:
+                self._recording = False
+            raise
+
+    # ------------------------------------------------------------------
     # Recording modes
     # ------------------------------------------------------------------
     def record_button_mode(self) -> np.ndarray:
@@ -125,24 +127,8 @@ class Recorder:
         with self._lock:
             self._recording = True
 
-        hw_rate = self._hw_rate
-        chunk = int(hw_rate * CHUNK_DURATION_MS / 1000)
-        stream_kwargs = {
-            "format": FORMAT,
-            "channels": CHANNELS,
-            "rate": hw_rate,
-            "input": True,
-            "frames_per_buffer": chunk,
-        }
-        if self._device_index is not None:
-            stream_kwargs["input_device_index"] = self._device_index
-
-        try:
-            stream = self._pa.open(**stream_kwargs)
-        except Exception:
-            with self._lock:
-                self._recording = False
-            raise
+        chunk = int(WHISPER_RATE * CHUNK_DURATION_MS / 1000)
+        stream = self._open_stream(chunk)
 
         frames: list[bytes] = []
 
@@ -160,7 +146,7 @@ class Recorder:
                 pass
 
         raw = b"".join(frames)
-        return self._to_float32(raw, hw_rate)
+        return self._to_float32(raw)
 
     def record_silence_mode(
         self, vad_aggressiveness: int = 1, break_length: int = 5
@@ -181,25 +167,8 @@ class Recorder:
         with self._lock:
             self._recording = True
 
-        hw_rate = self._hw_rate
-        chunk = int(hw_rate * CHUNK_DURATION_MS / 1000)
-
-        stream_kwargs = {
-            "format": FORMAT,
-            "channels": CHANNELS,
-            "rate": hw_rate,
-            "input": True,
-            "frames_per_buffer": chunk,
-        }
-        if self._device_index is not None:
-            stream_kwargs["input_device_index"] = self._device_index
-
-        try:
-            stream = self._pa.open(**stream_kwargs)
-        except Exception:
-            with self._lock:
-                self._recording = False
-            raise
+        chunk = int(WHISPER_RATE * CHUNK_DURATION_MS / 1000)
+        stream = self._open_stream(chunk)
 
         frames: list[bytes] = []
         # Buffer of 16 kHz float32 samples fed into Silero VAD.
@@ -215,8 +184,6 @@ class Recorder:
                 frames.append(data)
 
                 samples = np.frombuffer(data, dtype=np.int16)
-                if hw_rate != WHISPER_RATE:
-                    samples = _resample(samples, hw_rate, WHISPER_RATE)
                 chunk_f32 = samples.astype(np.float32) / 32768.0
                 vad_buffer = np.concatenate([vad_buffer, chunk_f32])
 
@@ -254,17 +221,15 @@ class Recorder:
                 pass
 
         raw = b"".join(frames)
-        return self._to_float32(raw, hw_rate)
+        return self._to_float32(raw)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _to_float32(raw_bytes: bytes, src_rate: int) -> np.ndarray:
-        """Convert raw int16 PCM bytes to a float32 numpy array in [-1, 1] at 16 kHz."""
+    def _to_float32(raw_bytes: bytes) -> np.ndarray:
+        """Convert raw int16 PCM bytes to a float32 numpy array in [-1, 1]."""
         samples = np.frombuffer(raw_bytes, dtype=np.int16)
-        if src_rate != WHISPER_RATE:
-            samples = _resample(samples, src_rate, WHISPER_RATE)
         return samples.astype(np.float32) / 32768.0
 
     def cleanup(self):

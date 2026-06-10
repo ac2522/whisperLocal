@@ -206,23 +206,41 @@ class SettingsDialog(QDialog):
         return group
 
     def _populate_device_combo(self) -> None:
-        """Fill the device combo from the current DeviceManager state."""
-        self._device_combo.clear()
-        # "System Default" entry with data=None
-        self._device_combo.addItem("System Default", None)
+        """Fill the device combo with PipeWire sources (friendly names).
 
-        saved_index = self._settings.get("audio_device_index")
+        Item data carries the PipeWire ``node.name`` (stable across
+        hotplug), or None for "follow the system default".  A saved mic
+        that's currently unplugged still appears — marked "(not
+        connected)" — so opening Settings never silently discards it.
+        """
+        self._device_combo.clear()
+
+        default = self._device_manager.get_default_source()
+        if default is not None:
+            label = f"System Default (currently: {default['description']})"
+        else:
+            label = "System Default"
+        self._device_combo.addItem(label, None)
+
+        saved_node = self._settings.get("audio_device_node")
+        saved_label = self._settings.get("audio_device_label")
         select_idx = 0  # default to "System Default"
 
-        for dev in self._device_manager.list_input_devices():
-            self._device_combo.addItem(dev["name"], dev["index"])
-            if dev["index"] == saved_index:
+        for src in self._device_manager.list_sources():
+            self._device_combo.addItem(src["description"], src["node_name"])
+            if src["node_name"] == saved_node:
                 select_idx = self._device_combo.count() - 1
+
+        if saved_node is not None and select_idx == 0:
+            self._device_combo.addItem(
+                f"{saved_label or saved_node} (not connected)", saved_node
+            )
+            select_idx = self._device_combo.count() - 1
 
         self._device_combo.setCurrentIndex(select_idx)
 
     def _refresh_device_list(self) -> None:
-        """Restart PyAudio, then refill the combo. Called from showPopup."""
+        """Refill the combo from a fresh pw-dump. Called from showPopup."""
         self._device_manager.refresh()
         self._populate_device_combo()
 
@@ -564,12 +582,14 @@ class SettingsDialog(QDialog):
         self._settings.set("compute_backend", self._compute_combo.currentData())
 
         # Audio device
-        device_index = self._device_combo.currentData()
-        self._settings.set("audio_device_index", device_index)
-        device_name = self._device_combo.currentText()
+        device_node = self._device_combo.currentData()
+        self._settings.set("audio_device_node", device_node)
+        device_label = self._device_combo.currentText()
+        if device_label.endswith(" (not connected)"):
+            device_label = device_label[: -len(" (not connected)")]
         self._settings.set(
-            "audio_device_name",
-            None if device_index is None else device_name,
+            "audio_device_label",
+            None if device_node is None else device_label,
         )
 
         # Recording

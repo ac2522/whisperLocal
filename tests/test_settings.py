@@ -27,8 +27,8 @@ class TestDefaultValues:
         assert sm.get('break_length') == 5
         assert sm.get('auto_paste') is False
         assert sm.get('transcripts') == []
-        assert sm.get('audio_device_index') is None
-        assert sm.get('audio_device_name') is None
+        assert sm.get('audio_device_node') is None
+        assert sm.get('audio_device_label') is None
 
     def test_creates_settings_dir(self, tmp_settings_dir):
         assert not os.path.exists(tmp_settings_dir)
@@ -99,7 +99,7 @@ class TestSaveAndLoad:
         # Missing keys should fall back to defaults
         assert sm.get('vad_aggressiveness') == 1
         assert sm.get('padding_duration_ms') == 1000
-        assert sm.get('audio_device_index') is None
+        assert sm.get('audio_device_node') is None
 
 
 class TestGetAll:
@@ -165,8 +165,8 @@ class TestBackwardCompatibility:
 
         sm = SettingsManager(settings_dir=tmp_settings_dir)
         # New keys should be present
-        assert sm.get('audio_device_index') is None
-        assert sm.get('audio_device_name') is None
+        assert sm.get('audio_device_node') is None
+        assert sm.get('audio_device_label') is None
 
 
 class TestModelSizeMigration:
@@ -259,3 +259,93 @@ class TestModelSizeMigration:
 
         sm2 = SettingsManager(settings_dir=tmp_settings_dir)
         assert sm2.get('model_size') == 'deepgram-nova-3'
+
+
+class TestAudioDeviceMigration:
+    """PyAudio device indices were replaced by PipeWire node names.
+
+    The legacy keys ``audio_device_index`` / ``audio_device_name`` are
+    dropped on load (an old index cannot be resolved to a node name) and
+    the new ``audio_device_node`` / ``audio_device_label`` keys take over.
+    """
+
+    def _write(self, settings_dir, data):
+        os.makedirs(settings_dir, exist_ok=True)
+        settings_file = os.path.join(settings_dir, 'settings.json')
+        with open(settings_file, 'w') as f:
+            json.dump(data, f)
+
+    def test_new_keys_in_defaults(self):
+        assert DEFAULT_SETTINGS['audio_device_node'] is None
+        assert DEFAULT_SETTINGS['audio_device_label'] is None
+
+    def test_legacy_keys_removed_from_defaults(self):
+        assert 'audio_device_index' not in DEFAULT_SETTINGS
+        assert 'audio_device_name' not in DEFAULT_SETTINGS
+
+    def test_legacy_keys_removed_on_load(self, tmp_settings_dir):
+        self._write(tmp_settings_dir, {
+            "audio_device_index": 13,
+            "audio_device_name": "foo",
+            "model_size": "ggml-base.bin",
+            "auto_paste": True,
+            "break_length": 7,
+        })
+
+        sm = SettingsManager(settings_dir=tmp_settings_dir)
+        all_settings = sm.get_all()
+
+        # Legacy keys are gone — NOT mapped to the new keys.
+        assert 'audio_device_index' not in all_settings
+        assert 'audio_device_name' not in all_settings
+        # New keys are present at their defaults.
+        assert 'audio_device_node' in all_settings
+        assert 'audio_device_label' in all_settings
+        assert all_settings['audio_device_node'] is None
+        assert all_settings['audio_device_label'] is None
+
+    def test_other_values_preserved_through_migration(self, tmp_settings_dir):
+        self._write(tmp_settings_dir, {
+            "audio_device_index": 13,
+            "audio_device_name": "foo",
+            "model_size": "ggml-base.bin",
+            "auto_paste": True,
+            "break_length": 7,
+            "transcripts": ["hello world"],
+            "vad_aggressiveness": 2,
+        })
+
+        sm = SettingsManager(settings_dir=tmp_settings_dir)
+        assert sm.get('model_size') == 'ggml-base.bin'
+        assert sm.get('auto_paste') is True
+        assert sm.get('break_length') == 7
+        assert sm.get('transcripts') == ["hello world"]
+        assert sm.get('vad_aggressiveness') == 2
+
+    def test_saved_node_and_label_round_trip(self, tmp_settings_dir):
+        self._write(tmp_settings_dir, {
+            "audio_device_node": "alsa_input.usb-foo.analog-stereo",
+            "audio_device_label": "Foo Mic",
+        })
+
+        sm = SettingsManager(settings_dir=tmp_settings_dir)
+        assert sm.get('audio_device_node') == "alsa_input.usb-foo.analog-stereo"
+        assert sm.get('audio_device_label') == "Foo Mic"
+
+    def test_legacy_keys_do_not_survive_save(self, tmp_settings_dir):
+        """After load+save, the file on disk has no legacy keys either."""
+        self._write(tmp_settings_dir, {
+            "audio_device_index": 13,
+            "audio_device_name": "foo",
+        })
+
+        sm = SettingsManager(settings_dir=tmp_settings_dir)
+        sm.save()
+
+        settings_file = os.path.join(tmp_settings_dir, 'settings.json')
+        with open(settings_file, 'r') as f:
+            on_disk = json.load(f)
+        assert 'audio_device_index' not in on_disk
+        assert 'audio_device_name' not in on_disk
+        assert on_disk['audio_device_node'] is None
+        assert on_disk['audio_device_label'] is None

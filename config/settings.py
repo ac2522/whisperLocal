@@ -23,8 +23,8 @@ DEFAULT_SETTINGS = {
     'auto_paste': False,
     'custom_vocabulary': [],
     'transcripts': [],
-    'audio_device_index': None,
-    'audio_device_name': None,
+    'audio_device_node': None,
+    'audio_device_label': None,
 }
 
 
@@ -115,6 +115,14 @@ class SettingsManager:
                     migrated,
                 )
                 self._settings['model_size'] = migrated
+
+        # Device selection moved from PyAudio indices to PipeWire node
+        # names. An old index can't be mapped to a node, so the legacy
+        # keys are simply dropped (the user re-picks their mic once).
+        for legacy_key in ('audio_device_index', 'audio_device_name'):
+            if legacy_key in self._settings:
+                logger.info("Removing legacy setting '%s'", legacy_key)
+                del self._settings[legacy_key]
 
     def get(self, key, default=None):
         """Return the value for *key*, or *default* if not present.

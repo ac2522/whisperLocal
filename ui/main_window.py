@@ -156,6 +156,7 @@ class MainWindow(QWidget):
     error_signal = pyqtSignal(str)
     recording_stopped_signal = pyqtSignal()
     update_status_signal = pyqtSignal(str)
+    no_speech_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -184,9 +185,9 @@ class MainWindow(QWidget):
         # --- Load WhisperEngine from saved model setting ---
         self.engine = self._load_initial_engine()
 
-        # --- Create Recorder with saved device ---
-        device_index = self._resolve_audio_device()
-        self.recorder = Recorder(device_index=device_index)
+        # --- Create Recorder (mic is resolved per-recording) ---
+        self.recorder = Recorder()
+        self._mic_label = self._resolve_mic_target()[1]
 
         # --- Load transcript history ---
         self.transcripts = self.settings.get('transcripts', [])
@@ -197,6 +198,7 @@ class MainWindow(QWidget):
         self.error_signal.connect(self._on_error)
         self.recording_stopped_signal.connect(self._on_recording_stopped)
         self.update_status_signal.connect(self._on_update_status)
+        self.no_speech_signal.connect(self._on_no_speech)
 
         # --- Build the UI ---
         self._init_ui()
@@ -398,56 +400,18 @@ class MainWindow(QWidget):
                 self.settings.save()
             return make_engine(model_path)
 
-    def _resolve_audio_device(self):
-        """Resolve saved audio device, recovering by name if index is stale.
+    def _resolve_mic_target(self):
+        """Resolve the saved mic against currently-connected sources.
 
-        PyAudio device indices are not stable across reboots or USB
-        hotplug.  If the saved index now points to a different device
-        (e.g. a Scarlett index became a Thunderbolt index), search by
-        the saved name and update settings.  Returns None to use the
-        system default.
+        Returns ``(target_node_or_None, human_label)``.  The saved choice
+        is never rewritten when the mic is unplugged — it'll be used
+        again the moment it's reconnected; recording falls back to the
+        system default in the meantime.
         """
-        saved_index = self.settings.get('audio_device_index')
-        saved_name = self.settings.get('audio_device_name')
-
-        if saved_index is None:
-            return None
-
-        devices = self.device_manager.list_input_devices()
-        by_index = {d['index']: d for d in devices}
-
-        # If the saved index still exists and matches the saved name, use it
-        if saved_index in by_index:
-            current = by_index[saved_index]
-            if not saved_name or current['name'] == saved_name:
-                return saved_index
-            logger.warning(
-                "Saved audio device index %s now points to '%s' (was '%s')",
-                saved_index, current['name'], saved_name,
-            )
-
-        # Try to find the device by its saved name
-        if saved_name:
-            for d in devices:
-                if d['name'] == saved_name:
-                    logger.info(
-                        "Audio device '%s' moved from index %s to %s",
-                        saved_name, saved_index, d['index'],
-                    )
-                    self.settings.set('audio_device_index', d['index'])
-                    self.settings.save()
-                    return d['index']
-
-        # Device is gone — fall back to system default
-        logger.warning(
-            "Saved audio device '%s' (index %s) not found. "
-            "Falling back to System Default.",
-            saved_name or '?', saved_index,
+        return self.device_manager.resolve_target(
+            self.settings.get('audio_device_node'),
+            self.settings.get('audio_device_label'),
         )
-        self.settings.set('audio_device_index', None)
-        self.settings.set('audio_device_name', None)
-        self.settings.save()
-        return None
 
     def _detect_compute_backend(self):
         """Return a human-readable backend string, with fallback annotations.
@@ -490,12 +454,8 @@ class MainWindow(QWidget):
         # GPU/CPU
         parts.append(self._detect_compute_backend())
 
-        # Mic name
-        device_name = self.settings.get('audio_device_name')
-        if device_name:
-            parts.append(f"Mic: {device_name}")
-        else:
-            parts.append("Mic: System Default")
+        # Mic name (resolved against currently-connected sources)
+        parts.append(f"Mic: {self._mic_label}")
 
         self.status_label.setText(" | ".join(parts))
 
@@ -703,6 +663,14 @@ class MainWindow(QWidget):
 
         recording_mode = self.settings.get('recording_mode', 'silence')
 
+        # Resolve the mic now: the saved device may have been (un)plugged
+        # since the last recording. Falls back to the system default.
+        target_node, mic_label = self._resolve_mic_target()
+        self.recorder.target_node = target_node
+        self._mic_label = mic_label
+        self._update_status_label()
+        logger.info("Recording from mic: %s (target=%s)", mic_label, target_node)
+
         self.record_button.setText('Stop Recording')
         self.record_button.setEnabled(True)  # Keep enabled so user can click to stop
         self.record_action.setText("Stop Recording")
@@ -747,8 +715,15 @@ class MainWindow(QWidget):
         try:
             vocabulary = self.settings.get("custom_vocabulary") or None
             text = self.engine.transcribe(audio_data, vocabulary=vocabulary)
-            if text and text.strip():
+            cleaned = (text or "").strip()
+            if cleaned and cleaned != "[BLANK_AUDIO]":
                 self.transcript_signal.emit(text)
+            else:
+                logger.info(
+                    "No speech detected (mic: %s, %d samples)",
+                    self._mic_label, len(audio_data),
+                )
+                self.no_speech_signal.emit()
         except Exception as e:
             logger.error("Error during transcription: %s", e, exc_info=True)
             self.error_signal.emit(str(e))
@@ -775,7 +750,6 @@ class MainWindow(QWidget):
         """Open the settings dialog. On accept, apply changes."""
         self._settings_dialog_open = True
         old_model = self.settings.get('model_size')
-        old_device = self.settings.get('audio_device_index')
         old_backend = self.settings.get('compute_backend')
 
         dialog = SettingsDialog(self.settings, self.model_manager, self.device_manager, parent=self)
@@ -783,17 +757,15 @@ class MainWindow(QWidget):
         self._settings_dialog_open = False
         if result == SettingsDialog.Accepted:
             new_model = self.settings.get('model_size')
-            new_device = self.settings.get('audio_device_index')
             new_backend = self.settings.get('compute_backend')
 
             # Reload engine if model or compute backend changed
             if new_model != old_model or new_backend != old_backend:
                 threading.Thread(target=self._reload_engine, daemon=True).start()
 
-            # Recreate recorder if device changed
-            if new_device != old_device:
-                self.recorder.cleanup()
-                self.recorder = Recorder(device_index=new_device)
+            # Mic choice is resolved at each recording start, so no
+            # recorder recreation is needed — just refresh the label.
+            self._mic_label = self._resolve_mic_target()[1]
 
             # Reload hotkey binding
             self._reload_hotkey()
@@ -1044,6 +1016,22 @@ class MainWindow(QWidget):
             self.status_label.setText(message)
         else:
             self._update_status_label()
+
+    def _on_no_speech(self):
+        """Slot for no_speech_signal: tell the user the recording was silent.
+
+        Without this, a muted or wrong mic looks like the app doing
+        nothing at all (2026-06-09 incident).
+        """
+        if self.tray_icon is not None:
+            self.tray_icon.showMessage(
+                "No speech detected",
+                f"The recording was silent — check your microphone "
+                f"({self._mic_label}).",
+                QSystemTrayIcon.Warning,
+                4000,
+            )
+        self.status_label.setText("No speech detected — check your microphone")
 
     # ------------------------------------------------------------------
     # Exception hook
